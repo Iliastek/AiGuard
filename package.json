@@ -9,15 +9,61 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./dist/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "aiguard.helloWorld",
         "title": "Hello World"
+      },
+      {
+        "command": "aiguard.showMenu",
+        "title": "AI Guard: Show Menu"
+      },
+      {
+        "command": "aiguard.startGuard",
+        "title": "AI Guard: Start Guard"
+      },
+      {
+        "command": "aiguard.pauseGuard",
+        "title": "AI Guard: Pause Guard"
+      },
+      {
+        "command": "aiguard.scanFile",
+        "title": "AI Guard: Scan Current File"
+      },
+      {
+        "command": "aiguard.openSettings",
+        "title": "AI Guard: Open Settings"
+      },
+      {
+        "command": "aiguard.viewReport",
+        "title": "AI Guard: View Report"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "AI Code Guard",
+      "properties": {
+        "aiCodeGuard.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API Key for AI Guard service"
+        },
+        "aiCodeGuard.scanMode": {
+          "type": "string",
+          "enum": [
+            "realtime",
+            "onDemand",
+            "preCommit"
+          ],
+          "default": "realtime",
+          "description": "Code scanning mode"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run package",

@@ -1,26 +1,53 @@
 // The module 'vscode' contains the VS Code extensibility API
 // Import the module and reference it with the alias vscode in your code below
-import * as vscode from 'vscode';
+import * as vscode from "vscode";
+import {
+  StatusBarController,
+  GuardState,
+} from "./statusBar/StatusBarController";
+import { MenuCommands } from "./commands/MenuCommands";
+import { ScanCommands } from "./commands/ScanCommands";
+
+let statusBarController: StatusBarController;
+let menuCommands: MenuCommands;
+let scanCommands: ScanCommands;
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
+  console.log("AI Code Guard is now active! 🛡️");
 
-	// Use the console to output diagnostic information (console.log) and errors (console.error)
-	// This line of code will only be executed once when your extension is activated
-	console.log('Congratulations, your extension "aiguard" is now active!');
+  // Initialize StatusBar
+  statusBarController = new StatusBarController();
+  context.subscriptions.push(statusBarController);
 
-	// The command has been defined in the package.json file
-	// Now provide the implementation of the command with registerCommand
-	// The commandId parameter must match the command field in package.json
-	const disposable = vscode.commands.registerCommand('aiguard.helloWorld', () => {
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('Hello World from AiGuard!');
-	});
+  // Initialize Command Handlers
+  menuCommands = new MenuCommands(statusBarController);
+  scanCommands = new ScanCommands(statusBarController);
 
-	context.subscriptions.push(disposable);
+  // Register Commands
+  context.subscriptions.push(
+    vscode.commands.registerCommand("aiguard.showMenu", () => {
+      menuCommands.showMenu();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("aiguard.startGuard", () => {
+      statusBarController.setState(GuardState.Active);
+      scanCommands.startRealtimeMonitoring();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("aiguard.pauseGuard", () => {
+      statusBarController.setState(GuardState.Paused);
+      scanCommands.stopRealtimeMonitoring();
+    }),
+  );
 }
 
 // This method is called when your extension is deactivated
-export function deactivate() {}
+export function deactivate() {
+  console.log("AI Code Guard deactivated");
+}

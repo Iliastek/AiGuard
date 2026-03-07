@@ -7,10 +7,12 @@ import {
 } from "./statusBar/StatusBarController";
 import { MenuCommands } from "./commands/MenuCommands";
 import { ScanCommands } from "./commands/ScanCommands";
+import { GuardPanelProvider } from "./panel/GuardPanelProvider";
 
 let statusBarController: StatusBarController;
 let menuCommands: MenuCommands;
 let scanCommands: ScanCommands;
+let guardPanelProvider: GuardPanelProvider;
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -24,7 +26,8 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Initialize Command Handlers
   menuCommands = new MenuCommands(statusBarController);
-  scanCommands = new ScanCommands(statusBarController);
+  guardPanelProvider = new GuardPanelProvider();
+  scanCommands = new ScanCommands(statusBarController, guardPanelProvider);
 
   // Register Commands
   context.subscriptions.push(
@@ -66,6 +69,19 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("aiguard.viewReport", async () => {
       await scanCommands.viewLastReport();
     }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("aiguard.focusSidebar", async () => {
+      await vscode.commands.executeCommand("workbench.view.extension.aiguard");
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(
+      GuardPanelProvider.viewType,
+      guardPanelProvider,
+    ),
   );
 
   context.subscriptions.push(scanCommands);

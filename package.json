@@ -17,7 +17,9 @@
     "onCommand:aiguard.pauseGuard",
     "onCommand:aiguard.scanFile",
     "onCommand:aiguard.openSettings",
-    "onCommand:aiguard.viewReport"
+    "onCommand:aiguard.viewReport",
+    "onCommand:aiguard.focusSidebar",
+    "onView:aiguard.sidebarView"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -49,8 +51,30 @@
       {
         "command": "aiguard.viewReport",
         "title": "AI Guard: View Report"
+      },
+      {
+        "command": "aiguard.focusSidebar",
+        "title": "AI Guard: Focus Sidebar"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiguard",
+          "title": "AI Guard",
+          "icon": "assets/aiguard.svg"
+        }
+      ]
+    },
+    "views": {
+      "aiguard": [
+        {
+          "id": "aiguard.sidebarView",
+          "name": "Guard Panel",
+          "type": "webview"
+        }
+      ]
+    },
     "configuration": {
       "title": "AI Code Guard",
       "properties": {

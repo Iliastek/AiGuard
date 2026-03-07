@@ -7,6 +7,7 @@ import { CodeAnalyzer } from "../analyzer/CodeAnalyzer";
 import { AICodeDetector } from "../analyzer/AICodeDetector";
 import { AIAnalyzer } from "../analyzer/AIAnalyzer";
 import { CodeIssue, ScanResult } from "../types";
+import { GuardPanelProvider } from "../panel/GuardPanelProvider";
 
 export class ScanCommands {
   private analyzer: CodeAnalyzer;
@@ -18,7 +19,10 @@ export class ScanCommands {
   private warningDecorationType: vscode.TextEditorDecorationType;
   private analysisRequestId = 0;
 
-  constructor(private statusBar: StatusBarController) {
+  constructor(
+    private statusBar: StatusBarController,
+    private panelProvider: GuardPanelProvider,
+  ) {
     this.analyzer = new CodeAnalyzer();
     this.aiDetector = new AICodeDetector();
     this.aiAnalyzer = new AIAnalyzer();
@@ -110,6 +114,7 @@ export class ScanCommands {
 
       this.lastScanResult = result;
       this.applyIssueDecorations(document, result.issues);
+      this.panelProvider.updateFromScanResult(result);
 
       if (result.issues.length > 0) {
         const message = `🛡️ AI Guard found ${result.issues.length} issue(s) in AI-generated code`;
@@ -158,6 +163,7 @@ export class ScanCommands {
       const result = await this.runAnalysis(editor.document);
       this.lastScanResult = result;
       this.applyIssueDecorations(editor.document, result.issues);
+      this.panelProvider.updateFromScanResult(result);
 
       if (result.issues.length === 0) {
         vscode.window.showInformationMessage(

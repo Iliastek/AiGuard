@@ -59,6 +59,28 @@
           "default": "",
           "description": "API Key for AI Guard service"
         },
+        "aiCodeGuard.apiEndpoint": {
+          "type": "string",
+          "default": "https://api.openai.com/v1/chat/completions",
+          "description": "AI API endpoint URL"
+        },
+        "aiCodeGuard.aiModel": {
+          "type": "string",
+          "default": "gpt-4o-mini",
+          "description": "AI model used for code analysis"
+        },
+        "aiCodeGuard.apiTimeoutMs": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "description": "Timeout for AI API requests in milliseconds"
+        },
+        "aiCodeGuard.maxAnalyzedChars": {
+          "type": "number",
+          "default": 12000,
+          "minimum": 1000,
+          "description": "Maximum number of code characters sent to AI API"
+        },
         "aiCodeGuard.scanMode": {
           "type": "string",
           "enum": [

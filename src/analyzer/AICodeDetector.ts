@@ -1,8 +1,8 @@
 import * as vscode from "vscode";
 
 export class AICodeDetector {
-  private lastChangeTimestamp: number = 0;
-  private changeThreshold: number = 100; // ms zwischen Änderungen
+  private lastChangeTimestamp = 0;
+  private readonly changeThreshold = 120; // ms zwischen Änderungen
 
   /**
    * Erkennt ob Code wahrscheinlich von AI generiert wurde
@@ -11,25 +11,38 @@ export class AICodeDetector {
    * - Mehrere Zeilen gleichzeitig
    * - Schnelle Änderungen
    */
-  public isLikelyAIGenerated(
+  public isHighConfidenceAIGenerated(
     change: vscode.TextDocumentContentChangeEvent,
   ): boolean {
+    // Ignore deletions and tiny edits to avoid manual typing false positives.
+    if (!change.text || change.text.trim().length === 0) {
+      return false;
+    }
+
     const now = Date.now();
     const timeSinceLastChange = now - this.lastChangeTimestamp;
     this.lastChangeTimestamp = now;
 
-    // Mehr als 50 Zeichen auf einmal = wahrscheinlich AI
-    if (change.text.length > 50) {
+    const textLength = change.text.length;
+    const insertedLines = change.text.split("\n").length;
+    const hasCopilotPattern = this.detectCopilotPatterns(change.text);
+
+    // High confidence: large multiline insertion.
+    if (textLength >= 120 && insertedLines >= 3) {
       return true;
     }
 
-    // Mehrere Zeilen auf einmal = wahrscheinlich AI
-    if (change.text.includes("\n") && change.text.split("\n").length > 2) {
+    // High confidence: pattern + enough size for generated block.
+    if (hasCopilotPattern && textLength >= 80 && insertedLines >= 2) {
       return true;
     }
 
-    // Sehr schnelle aufeinanderfolgende Änderungen = wahrscheinlich AI
-    if (timeSinceLastChange < this.changeThreshold && change.text.length > 20) {
+    // High confidence: very fast + large block.
+    if (
+      timeSinceLastChange < this.changeThreshold &&
+      textLength >= 100 &&
+      insertedLines >= 2
+    ) {
       return true;
     }
 
@@ -46,10 +59,9 @@ export class AICodeDetector {
   }
 
   /**
-   * Erkennt Copilot-spezifische Muster
+   * Erkennt typische Muster in AI-Completion-Blöcken.
    */
   public detectCopilotPatterns(text: string): boolean {
-    // Copilot fügt oft vollständige Funktionen/Kommentare ein
     const patterns = [
       /^function\s+\w+\(/m, // Funktionsdefinitionen
       /^const\s+\w+\s*=\s*\(/m, // Arrow Functions

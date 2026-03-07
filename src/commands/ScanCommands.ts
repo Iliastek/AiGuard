@@ -5,19 +5,23 @@ import {
 } from "../statusBar/StatusBarController";
 import { CodeAnalyzer } from "../analyzer/CodeAnalyzer";
 import { AICodeDetector } from "../analyzer/AICodeDetector";
+import { AIAnalyzer } from "../analyzer/AIAnalyzer";
 import { CodeIssue, ScanResult } from "../types";
 
 export class ScanCommands {
   private analyzer: CodeAnalyzer;
   private aiDetector: AICodeDetector;
+  private aiAnalyzer: AIAnalyzer;
   private documentChangeListener?: vscode.Disposable;
   private analysisTimeout?: NodeJS.Timeout;
   private lastScanResult?: ScanResult;
   private warningDecorationType: vscode.TextEditorDecorationType;
+  private analysisRequestId = 0;
 
   constructor(private statusBar: StatusBarController) {
     this.analyzer = new CodeAnalyzer();
     this.aiDetector = new AICodeDetector();
+    this.aiAnalyzer = new AIAnalyzer();
     this.warningDecorationType = vscode.window.createTextEditorDecorationType({
       backgroundColor: "rgba(255, 200, 0, 0.25)",
       isWholeLine: true,
@@ -49,34 +53,26 @@ export class ScanCommands {
 
         // Prüfe jede Änderung
         for (const change of event.contentChanges) {
-          // Ist das wahrscheinlich AI-generierter Code?
-          const isAIGenerated = this.aiDetector.isLikelyAIGenerated(change);
-          const hasCopilotPattern = this.aiDetector.detectCopilotPatterns(
-            change.text,
-          );
-
-          if (isAIGenerated || hasCopilotPattern) {
-            console.log("🤖 AI-generated code detected:", {
-              length: change.text.length,
-              lines: change.text.split("\n").length,
-              isAIGenerated,
-              hasCopilotPattern,
-            });
-
-            // Zeige notification
-            vscode.window.showInformationMessage(
-              `🛡️ AI Guard: Analyzing AI-generated code...`,
-            );
-
-            // Debounce: Warte 500ms bevor Analyse startet
-            if (this.analysisTimeout) {
-              clearTimeout(this.analysisTimeout);
-            }
-
-            this.analysisTimeout = setTimeout(async () => {
-              await this.analyzeAICode(event.document);
-            }, 500);
+          // Realtime only for high-confidence AI-generated inserts.
+          const isHighConfidenceAI =
+            this.aiDetector.isHighConfidenceAIGenerated(change);
+          if (!isHighConfidenceAI) {
+            continue;
           }
+
+          console.log("🤖 High-confidence AI code detected:", {
+            length: change.text.length,
+            lines: change.text.split("\n").length,
+          });
+
+          // Debounce: Warte 500ms bevor Analyse startet
+          if (this.analysisTimeout) {
+            clearTimeout(this.analysisTimeout);
+          }
+
+          this.analysisTimeout = setTimeout(async () => {
+            await this.analyzeAICode(event.document);
+          }, 500);
         }
       },
     );
@@ -103,9 +99,15 @@ export class ScanCommands {
   private async analyzeAICode(
     document: vscode.TextDocument,
   ): Promise<void> {
+    const requestId = ++this.analysisRequestId;
+
     try {
-      // Scanne das gesamte Dokument
-      const result = await this.analyzer.analyzeDocument(document);
+      const result = await this.runAnalysis(document);
+
+      if (requestId !== this.analysisRequestId) {
+        return;
+      }
+
       this.lastScanResult = result;
       this.applyIssueDecorations(document, result.issues);
 
@@ -150,7 +152,7 @@ export class ScanCommands {
     }
 
     try {
-      const result = await this.analyzer.analyzeDocument(editor.document);
+      const result = await this.runAnalysis(editor.document);
       this.lastScanResult = result;
       this.applyIssueDecorations(editor.document, result.issues);
 
@@ -170,6 +172,23 @@ export class ScanCommands {
       this.clearIssueDecorations();
       vscode.window.showErrorMessage("AI Guard: Failed to scan current file");
       console.error("Error scanning current file:", error);
+    }
+  }
+
+  private async runAnalysis(
+    document: vscode.TextDocument,
+  ): Promise<ScanResult> {
+    const localResult = await this.analyzer.analyzeDocument(document);
+
+    try {
+      const aiIssues = await this.aiAnalyzer.analyzeWithAPI(document);
+      return {
+        ...localResult,
+        issues: [...localResult.issues, ...aiIssues],
+      };
+    } catch (error) {
+      console.warn("AI API analysis failed, using local analysis only:", error);
+      return localResult;
     }
   }
 

@@ -7,6 +7,7 @@ interface AIAnalyzerIssue {
   severity?: "info" | "warning" | "error";
   message?: string;
   suggestedFix?: string;
+  codeSnippet?: string;
 }
 
 interface ChatCompletionResponse {
@@ -73,13 +74,18 @@ export class AIAnalyzer {
   }
 
   private buildPrompt(languageId: string, code: string): string {
+    const numberedCode = this.withLineNumbers(code);
+
     return [
       "Analyze this code for bugs, security risks, maintainability issues, and suspicious AI-generated mistakes.",
       "Return JSON only in this format:",
-      '{"issues":[{"line":number,"severity":"info|warning|error","message":"string","suggestedFix":"string optional"}]}',
+      '{"issues":[{"line":number,"severity":"info|warning|error","message":"string","suggestedFix":"string optional","codeSnippet":"string optional"}]}',
+      "Use the line numbers from the code block below (they are prefixed as L<line>:).",
+      "line must be 1-based and refer to the exact line number in that numbered code.",
+      "If uncertain, set line to 0 and provide codeSnippet.",
       `Language: ${languageId}`,
       "Code:",
-      code,
+      numberedCode,
     ].join("\n");
   }
 
@@ -115,23 +121,76 @@ export class AIAnalyzer {
     return issues
       .filter((issue) => typeof issue.message === "string" && issue.message.trim().length > 0)
       .map((issue, index) => {
-        const line = Math.max(0, Math.min((issue.line ?? 1) - 1, document.lineCount - 1));
-        const lineText = document.lineAt(line).text;
+        const line = this.resolveLine(document, issue);
+        const lineText = line >= 0 ? document.lineAt(line).text : "";
 
         return {
           id: `ai-issue-${Date.now()}-${index}`,
           line,
           column: 0,
           endLine: line,
-          endColumn: lineText.length,
+          endColumn: lineText.length > 0 ? lineText.length : 1,
           severity: issue.severity ?? "warning",
           message: `AI Guard: ${issue.message!.trim()}`,
-          originalCode: lineText.trim(),
+          originalCode: lineText.trim() || issue.codeSnippet?.trim() || "",
           suggestedFix: issue.suggestedFix?.trim() || undefined,
           source: "ai-generated",
           status: "pending",
         };
       });
+  }
+
+  private resolveLine(
+    document: vscode.TextDocument,
+    issue: AIAnalyzerIssue,
+  ): number {
+    if (typeof issue.line === "number" && Number.isInteger(issue.line)) {
+      if (issue.line >= 1 && issue.line <= document.lineCount) {
+        return issue.line - 1;
+      }
+    }
+
+    const snippet = this.stripLinePrefix(issue.codeSnippet?.trim() ?? "");
+    if (snippet) {
+      const foundIndex = this.findLineBySnippet(document, snippet);
+      if (foundIndex >= 0) {
+        return foundIndex;
+      }
+    }
+
+    // Unknown position: keep issue, but skip inline highlight.
+    return -1;
+  }
+
+  private findLineBySnippet(document: vscode.TextDocument, snippet: string): number {
+    const normalizedSnippet = this.normalizeForMatch(snippet);
+
+    if (!normalizedSnippet) {
+      return -1;
+    }
+
+    for (let i = 0; i < document.lineCount; i += 1) {
+      const line = this.normalizeForMatch(document.lineAt(i).text);
+      if (line.includes(normalizedSnippet)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private withLineNumbers(code: string): string {
+    return code
+      .split("\n")
+      .map((line, index) => `L${index + 1}: ${line}`)
+      .join("\n");
+  }
+
+  private stripLinePrefix(text: string): string {
+    return text.replace(/^L\d+:\s*/i, "").trim();
+  }
+
+  private normalizeForMatch(text: string): string {
+    return text.replace(/\s+/g, " ").trim();
   }
 
   private postJSON(

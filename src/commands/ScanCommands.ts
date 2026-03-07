@@ -133,7 +133,10 @@ export class ScanCommands {
 
   private showIssuesQuickPick(issues: CodeIssue[]): void {
     const items = issues.map((issue) => ({
-      label: `$(warning) Line ${issue.line + 1}`,
+      label:
+        issue.line >= 0
+          ? `$(warning) Line ${issue.line + 1}`
+          : "$(warning) Unknown line",
       description: issue.message,
       detail: issue.originalCode,
     }));

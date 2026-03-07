@@ -81,6 +81,11 @@
           "minimum": 1000,
           "description": "Maximum number of code characters sent to AI API"
         },
+        "aiCodeGuard.localRules.consoleStatements": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable local rule that flags console.log/warn/error statements"
+        },
         "aiCodeGuard.scanMode": {
           "type": "string",
           "enum": [

@@ -9,14 +9,15 @@ export enum GuardState {
 
 export class StatusBarController {
   private statusBarItem: vscode.StatusBarItem;
-  private currentState: GuardState = GuardState.Inactive;
+  private currentState: GuardState = GuardState.Paused;
 
   constructor() {
     // Erstelle StatusBar Item (unten links)
     this.statusBarItem = vscode.window.createStatusBarItem(
       vscode.StatusBarAlignment.Left,
-      100,
+      1000,
     );
+    this.statusBarItem.name = "AI Guard";
 
     // Command beim Klick (kommt später)
     this.statusBarItem.command = "aiguard.showMenu";
@@ -39,28 +40,25 @@ export class StatusBarController {
     switch (this.currentState) {
       case GuardState.Active:
         // Grün/Aktiv
-        this.statusBarItem.text = "$(shield-check) AI Guard";
-        this.statusBarItem.backgroundColor = new vscode.ThemeColor(
-          "statusBarItem.warningBackground",
-        );
+        this.statusBarItem.text = "$(shield) AI Guard";
+        this.statusBarItem.backgroundColor = undefined;
+        this.statusBarItem.color = "#16a34a";
         this.statusBarItem.tooltip = "AI Guard is active - Click for options";
         break;
 
       case GuardState.Paused:
         // Gelb/Pausiert
         this.statusBarItem.text = "$(shield) AI Guard";
-        this.statusBarItem.backgroundColor = new vscode.ThemeColor(
-          "statusBarItem.prominentBackground",
-        );
+        this.statusBarItem.backgroundColor = undefined;
+        this.statusBarItem.color = "#d97706";
         this.statusBarItem.tooltip = "AI Guard is paused - Click to resume";
         break;
 
       case GuardState.Error:
         // Rot/Fehler
-        this.statusBarItem.text = "$(shield-x) AI Guard";
-        this.statusBarItem.backgroundColor = new vscode.ThemeColor(
-          "statusBarItem.errorBackground",
-        );
+        this.statusBarItem.text = "$(shield) AI Guard";
+        this.statusBarItem.backgroundColor = undefined;
+        this.statusBarItem.color = "#dc2626";
         this.statusBarItem.tooltip = "AI Guard error - Click for details";
         break;
 
@@ -68,6 +66,7 @@ export class StatusBarController {
         // Inaktiv
         this.statusBarItem.text = "$(shield) AI Guard";
         this.statusBarItem.backgroundColor = undefined;
+        this.statusBarItem.color = undefined;
         this.statusBarItem.tooltip = "AI Guard inactive - Click to start";
     }
   }

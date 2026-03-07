@@ -4,13 +4,20 @@
   "description": "",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.109.0"
+    "vscode": "^1.80.0"
   },
   "categories": [
     "Other"
   ],
   "activationEvents": [
-    "onStartupFinished"
+    "*",
+    "onStartupFinished",
+    "onCommand:aiguard.showMenu",
+    "onCommand:aiguard.startGuard",
+    "onCommand:aiguard.pauseGuard",
+    "onCommand:aiguard.scanFile",
+    "onCommand:aiguard.openSettings",
+    "onCommand:aiguard.viewReport"
   ],
   "main": "./dist/extension.js",
   "contributes": {

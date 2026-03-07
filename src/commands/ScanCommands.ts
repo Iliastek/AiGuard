@@ -5,21 +5,33 @@ import {
 } from "../statusBar/StatusBarController";
 import { CodeAnalyzer } from "../analyzer/CodeAnalyzer";
 import { AICodeDetector } from "../analyzer/AICodeDetector";
-import { CodeIssue } from "../types";
+import { CodeIssue, ScanResult } from "../types";
 
 export class ScanCommands {
   private analyzer: CodeAnalyzer;
   private aiDetector: AICodeDetector;
   private documentChangeListener?: vscode.Disposable;
   private analysisTimeout?: NodeJS.Timeout;
+  private lastScanResult?: ScanResult;
+  private warningDecorationType: vscode.TextEditorDecorationType;
 
   constructor(private statusBar: StatusBarController) {
     this.analyzer = new CodeAnalyzer();
     this.aiDetector = new AICodeDetector();
+    this.warningDecorationType = vscode.window.createTextEditorDecorationType({
+      backgroundColor: "rgba(255, 200, 0, 0.25)",
+      isWholeLine: true,
+      overviewRulerColor: "rgba(255, 200, 0, 0.7)",
+      overviewRulerLane: vscode.OverviewRulerLane.Right,
+    });
   }
 
   public startRealtimeMonitoring(): void {
     console.log("🛡️ AI Guard: Realtime monitoring started");
+
+    if (this.documentChangeListener) {
+      return;
+    }
 
     // Überwache Text-Änderungen
     this.documentChangeListener = vscode.workspace.onDidChangeTextDocument(
@@ -62,7 +74,7 @@ export class ScanCommands {
             }
 
             this.analysisTimeout = setTimeout(async () => {
-              await this.analyzeAICode(event.document, change);
+              await this.analyzeAICode(event.document);
             }, 500);
           }
         }
@@ -90,11 +102,12 @@ export class ScanCommands {
 
   private async analyzeAICode(
     document: vscode.TextDocument,
-    change: vscode.TextDocumentContentChangeEvent,
   ): Promise<void> {
     try {
       // Scanne das gesamte Dokument
       const result = await this.analyzer.analyzeDocument(document);
+      this.lastScanResult = result;
+      this.applyIssueDecorations(document, result.issues);
 
       if (result.issues.length > 0) {
         const message = `🛡️ AI Guard found ${result.issues.length} issue(s) in AI-generated code`;
@@ -128,6 +141,99 @@ export class ScanCommands {
     });
   }
 
+  public async scanCurrentFile(): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+
+    if (!editor) {
+      vscode.window.showWarningMessage("AI Guard: No active file to scan");
+      return;
+    }
+
+    try {
+      const result = await this.analyzer.analyzeDocument(editor.document);
+      this.lastScanResult = result;
+      this.applyIssueDecorations(editor.document, result.issues);
+
+      if (result.issues.length === 0) {
+        vscode.window.showInformationMessage(
+          "AI Guard: No issues found in current file",
+        );
+        return;
+      }
+
+      vscode.window.showWarningMessage(
+        `AI Guard: Found ${result.issues.length} issue(s) in current file`,
+      );
+      this.showIssuesQuickPick(result.issues);
+    } catch (error) {
+      this.statusBar.setState(GuardState.Error);
+      this.clearIssueDecorations();
+      vscode.window.showErrorMessage("AI Guard: Failed to scan current file");
+      console.error("Error scanning current file:", error);
+    }
+  }
+
+  public async viewLastReport(): Promise<void> {
+    if (!this.lastScanResult) {
+      vscode.window.showInformationMessage(
+        "AI Guard: No report available yet. Run a scan first.",
+      );
+      return;
+    }
+
+    const { issues, scanDuration, timestamp } = this.lastScanResult;
+    const summary = `Issues: ${issues.length} | Duration: ${scanDuration}ms | Time: ${timestamp.toLocaleTimeString()}`;
+
+    const details = issues
+      .slice(0, 5)
+      .map((issue) => `Line ${issue.line + 1}: ${issue.message}`)
+      .join("\n");
+
+    await vscode.window.showInformationMessage(
+      details ? `${summary}\n${details}` : summary,
+    );
+  }
+
+  private applyIssueDecorations(
+    document: vscode.TextDocument,
+    issues: CodeIssue[],
+  ): void {
+    const editor = vscode.window.visibleTextEditors.find(
+      (candidate) => candidate.document.uri.toString() === document.uri.toString(),
+    );
+
+    if (!editor) {
+      return;
+    }
+
+    if (issues.length === 0) {
+      editor.setDecorations(this.warningDecorationType, []);
+      return;
+    }
+
+    const decorations: vscode.DecorationOptions[] = [];
+
+    for (const issue of issues) {
+      if (issue.line < 0 || issue.line >= document.lineCount) {
+        continue;
+      }
+
+      const lineRange = document.lineAt(issue.line).range;
+      decorations.push({
+        range: lineRange,
+        hoverMessage: `Guard Suggestion: ${issue.message}`,
+      });
+    }
+
+    editor.setDecorations(this.warningDecorationType, decorations);
+  }
+
+  private clearIssueDecorations(): void {
+    for (const editor of vscode.window.visibleTextEditors) {
+      editor.setDecorations(this.warningDecorationType, []);
+    }
+  }
+
   private isSupportedLanguage(languageId: string): boolean {
     const supported = [
       "javascript",
@@ -146,5 +252,7 @@ export class ScanCommands {
 
   public dispose(): void {
     this.stopRealtimeMonitoring();
+    this.clearIssueDecorations();
+    this.warningDecorationType.dispose();
   }
 }

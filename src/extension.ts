@@ -16,6 +16,7 @@ let scanCommands: ScanCommands;
 // Your extension is activated the very first time the command is executed
 export function activate(context: vscode.ExtensionContext) {
   console.log("AI Code Guard is now active! 🛡️");
+  void vscode.window.showInformationMessage("AI Guard loaded");
 
   // Initialize StatusBar
   statusBarController = new StatusBarController();
@@ -45,6 +46,29 @@ export function activate(context: vscode.ExtensionContext) {
       scanCommands.stopRealtimeMonitoring();
     }),
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("aiguard.scanFile", async () => {
+      await scanCommands.scanCurrentFile();
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("aiguard.openSettings", async () => {
+      await vscode.commands.executeCommand(
+        "workbench.action.openSettings",
+        "aiCodeGuard",
+      );
+    }),
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("aiguard.viewReport", async () => {
+      await scanCommands.viewLastReport();
+    }),
+  );
+
+  context.subscriptions.push(scanCommands);
 }
 
 // This method is called when your extension is deactivated

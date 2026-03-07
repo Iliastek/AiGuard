@@ -24,6 +24,21 @@ export class MenuCommands {
       });
     }
 
+    items.push(
+      {
+        label: "$(search) Scan File Now",
+        description: "Analyze the currently open file",
+      },
+      {
+        label: "$(report) View Report",
+        description: "Show latest scan summary",
+      },
+      {
+        label: "$(settings-gear) Settings",
+        description: "Open AI Guard settings",
+      },
+    );
+
     const selection = await vscode.window.showQuickPick(items, {
       placeHolder: "AI Code Guard - Copilot Monitor",
     });
@@ -33,9 +48,15 @@ export class MenuCommands {
     }
 
     if (selection.label.includes("Start Guard")) {
-      vscode.commands.executeCommand("aiguard.startGuard");
+      await vscode.commands.executeCommand("aiguard.startGuard");
     } else if (selection.label.includes("Pause Guard")) {
-      vscode.commands.executeCommand("aiguard.pauseGuard");
+      await vscode.commands.executeCommand("aiguard.pauseGuard");
+    } else if (selection.label.includes("Scan File Now")) {
+      await vscode.commands.executeCommand("aiguard.scanFile");
+    } else if (selection.label.includes("View Report")) {
+      await vscode.commands.executeCommand("aiguard.viewReport");
+    } else if (selection.label.includes("Settings")) {
+      await vscode.commands.executeCommand("aiguard.openSettings");
     }
   }
 }

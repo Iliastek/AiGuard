@@ -6,7 +6,7 @@ import {
 import { CodeAnalyzer } from "../analyzer/CodeAnalyzer";
 import { AICodeDetector } from "../analyzer/AICodeDetector";
 import { AIAnalyzer } from "../analyzer/AIAnalyzer";
-import { CodeIssue, ScanResult } from "../types";
+import { CodeFix, CodeIssue, ScanResult } from "../types";
 import { GuardPanelProvider } from "../panel/GuardPanelProvider";
 
 export class ScanCommands {
@@ -18,6 +18,9 @@ export class ScanCommands {
   private lastScanResult?: ScanResult;
   private warningDecorationType: vscode.TextEditorDecorationType;
   private analysisRequestId = 0;
+  private previewBaseline?: { uri: string; text: string };
+  private lastRenderedPreviewText?: string;
+  private suppressDocumentEvents = false;
 
   constructor(
     private statusBar: StatusBarController,
@@ -44,6 +47,10 @@ export class ScanCommands {
     // Überwache Text-Änderungen
     this.documentChangeListener = vscode.workspace.onDidChangeTextDocument(
       async (event) => {
+        if (this.suppressDocumentEvents) {
+          return;
+        }
+
         // Nur aktiv wenn Guard läuft
         if (this.statusBar.getState() !== GuardState.Active) {
           return;
@@ -113,6 +120,7 @@ export class ScanCommands {
       }
 
       this.lastScanResult = result;
+      await this.initializePreviewMode(result, document);
       this.applyIssueDecorations(document, result.issues);
       this.panelProvider.updateFromScanResult(result);
 
@@ -162,6 +170,7 @@ export class ScanCommands {
     try {
       const result = await this.runAnalysis(editor.document);
       this.lastScanResult = result;
+      await this.initializePreviewMode(result, editor.document);
       this.applyIssueDecorations(editor.document, result.issues);
       this.panelProvider.updateFromScanResult(result);
 
@@ -219,6 +228,409 @@ export class ScanCommands {
 
     await vscode.window.showInformationMessage(
       details ? `${summary}\n${details}` : summary,
+    );
+  }
+
+  public async applyFix(issueId: string): Promise<void> {
+    if (!this.lastScanResult) {
+      return;
+    }
+
+    const issue = this.lastScanResult.issues.find((item) => item.id === issueId);
+    if (!issue || issue.status !== "open" || !issue.isPreviewed) {
+      return;
+    }
+
+    const document = await this.openPreviewDocument();
+    if (!document || !this.ensurePreviewSync(document)) {
+      return;
+    }
+
+    issue.isPreviewed = false;
+    issue.status = "applied";
+    await this.rebuildPreviewDocument(document);
+  }
+
+  public async ignoreIssue(issueId: string): Promise<void> {
+    if (!this.lastScanResult) {
+      return;
+    }
+
+    const issue = this.lastScanResult.issues.find((item) => item.id === issueId);
+    if (!issue || issue.status !== "open") {
+      return;
+    }
+
+    const document = await this.openPreviewDocument();
+    if (!document || !this.ensurePreviewSync(document)) {
+      return;
+    }
+
+    issue.isPreviewed = false;
+    issue.status = "ignored";
+    await this.rebuildPreviewDocument(document);
+  }
+
+  public async applyAll(): Promise<void> {
+    if (!this.lastScanResult) {
+      return;
+    }
+
+    const document = await this.openPreviewDocument();
+    if (!document || !this.ensurePreviewSync(document)) {
+      return;
+    }
+
+    let appliedCount = 0;
+    for (const issue of this.lastScanResult.issues) {
+      if (issue.status === "open" && issue.isPreviewed) {
+        issue.isPreviewed = false;
+        issue.status = "applied";
+        appliedCount += 1;
+      }
+    }
+
+    await this.rebuildPreviewDocument(document);
+    if (appliedCount > 0) {
+      vscode.window.showInformationMessage(`AI Guard: Apply All finished (${appliedCount} applied)`);
+    }
+  }
+
+  public async ignoreAll(): Promise<void> {
+    if (!this.lastScanResult) {
+      return;
+    }
+
+    const document = await this.openPreviewDocument();
+    if (!document || !this.ensurePreviewSync(document)) {
+      return;
+    }
+
+    for (const issue of this.lastScanResult.issues) {
+      if (issue.status === "open") {
+        issue.isPreviewed = false;
+        issue.status = "ignored";
+      }
+    }
+
+    await this.rebuildPreviewDocument(document);
+  }
+
+  private async initializePreviewMode(
+    result: ScanResult,
+    document: vscode.TextDocument,
+  ): Promise<void> {
+    this.previewBaseline = {
+      uri: result.fileUri,
+      text: document.getText(),
+    };
+
+    for (const issue of result.issues) {
+      issue.fix = this.resolveFixForIssue(issue);
+      issue.isPreviewed = issue.status === "open" && Boolean(issue.fix);
+    }
+
+    const previewText = this.buildPreviewText(result.issues);
+    if (previewText === undefined) {
+      return;
+    }
+
+    const applied = await this.replaceDocumentText(document, previewText);
+    if (applied) {
+      this.lastRenderedPreviewText = previewText;
+    }
+  }
+
+  private async rebuildPreviewDocument(document: vscode.TextDocument): Promise<void> {
+    if (!this.lastScanResult || !this.previewBaseline) {
+      return;
+    }
+
+    const text = this.buildPreviewText(this.lastScanResult.issues);
+    if (text === undefined) {
+      vscode.window.showWarningMessage(
+        "AI Guard: Could not rebuild preview due to invalid fix ranges",
+      );
+      return;
+    }
+
+    const applied = await this.replaceDocumentText(document, text);
+    if (!applied) {
+      vscode.window.showErrorMessage("AI Guard: Failed to update preview state");
+      return;
+    }
+
+    this.lastRenderedPreviewText = text;
+    await this.refreshFileDecorations();
+    this.panelProvider.updateFromScanResult(this.lastScanResult);
+  }
+
+  private buildPreviewText(issues: CodeIssue[]): string | undefined {
+    if (!this.previewBaseline) {
+      return undefined;
+    }
+
+    const baseText = this.previewBaseline.text;
+    const workingIssues = issues.filter(
+      (issue) =>
+        (issue.status === "open" && issue.isPreviewed) || issue.status === "applied",
+    );
+
+    const replacements: Array<{ start: number; end: number; text: string }> = [];
+
+    for (const issue of workingIssues) {
+      issue.fix = this.resolveFixForIssue(issue);
+      if (!issue.fix) {
+        continue;
+      }
+
+      const offsets = this.getOffsetsForFix(this.previewBaseline.text, issue);
+      if (!offsets) {
+        return undefined;
+      }
+
+      replacements.push({
+        start: offsets.start,
+        end: offsets.end,
+        text: issue.fix.type === "delete" ? "" : issue.fix.replacement,
+      });
+    }
+
+    replacements.sort((a, b) => b.start - a.start);
+
+    let nextStart = Number.POSITIVE_INFINITY;
+    let output = baseText;
+    for (const replacement of replacements) {
+      if (replacement.end > nextStart) {
+        continue;
+      }
+      output =
+        output.slice(0, replacement.start) +
+        replacement.text +
+        output.slice(replacement.end);
+      nextStart = replacement.start;
+    }
+
+    return output;
+  }
+
+  private ensurePreviewSync(document: vscode.TextDocument): boolean {
+    if (!this.lastRenderedPreviewText) {
+      return true;
+    }
+
+    if (document.getText() !== this.lastRenderedPreviewText) {
+      vscode.window.showWarningMessage(
+        "AI Guard: File changed after preview. Please run a new scan.",
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  private async openPreviewDocument(): Promise<vscode.TextDocument | undefined> {
+    if (!this.lastScanResult) {
+      return undefined;
+    }
+
+    try {
+      return await vscode.workspace.openTextDocument(
+        vscode.Uri.parse(this.lastScanResult.fileUri),
+      );
+    } catch {
+      vscode.window.showErrorMessage("AI Guard: Could not open file for preview updates");
+      return undefined;
+    }
+  }
+
+  private async replaceDocumentText(
+    document: vscode.TextDocument,
+    text: string,
+  ): Promise<boolean> {
+    if (document.getText() === text) {
+      return true;
+    }
+
+    const fullRange = new vscode.Range(
+      document.positionAt(0),
+      document.positionAt(document.getText().length),
+    );
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, fullRange, text);
+    this.suppressDocumentEvents = true;
+    try {
+      return await vscode.workspace.applyEdit(edit);
+    } finally {
+      this.suppressDocumentEvents = false;
+    }
+  }
+
+  private getOffsetsForFix(
+    baseText: string,
+    issue: CodeIssue,
+  ): { start: number; end: number } | undefined {
+    if (!issue.fix) {
+      return undefined;
+    }
+
+    const lines = baseText.split("\n");
+    const lineStarts: number[] = [];
+    let offset = 0;
+    for (const line of lines) {
+      lineStarts.push(offset);
+      offset += line.length + 1;
+    }
+
+    const { startLine, startColumn, endLine, endColumn } = issue.fix.range;
+    if (
+      startLine < 0 ||
+      endLine < startLine ||
+      startLine >= lines.length ||
+      endLine >= lines.length
+    ) {
+      return undefined;
+    }
+
+    if (
+      startColumn < 0 ||
+      endColumn < 0 ||
+      startColumn > lines[startLine].length ||
+      endColumn > lines[endLine].length
+    ) {
+      return undefined;
+    }
+
+    if (issue.fix.type === "delete" && startLine === endLine) {
+      const start = lineStarts[startLine];
+      const end =
+        startLine + 1 < lines.length
+          ? lineStarts[startLine + 1]
+          : lineStarts[startLine] + lines[startLine].length;
+      return { start, end };
+    }
+
+    const start = lineStarts[startLine] + startColumn;
+    const end = lineStarts[endLine] + endColumn;
+    if (end < start) {
+      return undefined;
+    }
+    return { start, end };
+  }
+
+  private resolveFixForIssue(issue: CodeIssue): CodeFix | undefined {
+    if (issue.fix) {
+      return issue.fix;
+    }
+
+    const fallbackReplacement = this.deriveReplacementFromSuggestion(
+      issue.suggestedFix,
+      issue.originalCode,
+    );
+    if (!fallbackReplacement || issue.line < 0) {
+      return undefined;
+    }
+
+    return {
+      type: "replace",
+      range: {
+        startLine: issue.line,
+        startColumn: 0,
+        endLine: issue.endLine >= issue.line ? issue.endLine : issue.line,
+        endColumn: Math.max(issue.endColumn, issue.column + 1),
+      },
+      replacement: fallbackReplacement,
+    };
+  }
+
+  private deriveReplacementFromSuggestion(
+    suggestion: string | undefined,
+    originalCode: string,
+  ): string | undefined {
+    const raw = suggestion?.trim();
+    if (!raw) {
+      return undefined;
+    }
+
+    if (!this.looksLikeInstruction(raw)) {
+      return raw;
+    }
+
+    // Pattern: "Change 'old' to 'new'."
+    const changeMatch = raw.match(
+      /change\s+['"`](.+?)['"`]\s+to\s+['"`](.+?)['"`]/i,
+    );
+    if (changeMatch) {
+      const from = changeMatch[1];
+      const to = changeMatch[2];
+      if (originalCode.includes(from)) {
+        return originalCode.replace(from, to);
+      }
+      return originalCode.replace(new RegExp(this.escapeRegExp(from), "g"), to);
+    }
+
+    // Pattern: "...: actual code"
+    const colonIndex = raw.indexOf(":");
+    if (colonIndex >= 0 && colonIndex < raw.length - 1) {
+      const tail = raw.slice(colonIndex + 1).trim();
+      if (tail && !this.looksLikeInstruction(tail)) {
+        return tail;
+      }
+    }
+
+    return undefined;
+  }
+
+  private looksLikeInstruction(text: string): boolean {
+    const normalized = text.trim();
+    if (!normalized) {
+      return true;
+    }
+
+    if (/^(initialize|use|change|consider|replace|set|add|remove|update)\b/i.test(normalized)) {
+      return true;
+    }
+
+    if (/\b(instead of|such as|for example)\b/i.test(normalized)) {
+      return true;
+    }
+
+    // Natural language sentence ending with period and spaces is likely prose.
+    if (normalized.endsWith(".") && /\s/.test(normalized)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  private async refreshFileDecorations(): Promise<void> {
+    if (!this.lastScanResult) {
+      return;
+    }
+
+    const openEditor = vscode.window.visibleTextEditors.find(
+      (editor) =>
+        editor.document.uri.toString() === this.lastScanResult?.fileUri,
+    );
+
+    if (openEditor) {
+      this.applyIssueDecorations(
+        openEditor.document,
+        this.lastScanResult.issues.filter((issue) => issue.status === "open"),
+      );
+      return;
+    }
+
+    const document = await vscode.workspace.openTextDocument(
+      vscode.Uri.parse(this.lastScanResult.fileUri),
+    );
+    this.applyIssueDecorations(
+      document,
+      this.lastScanResult.issues.filter((issue) => issue.status === "open"),
     );
   }
 

@@ -28,6 +28,22 @@ export function activate(context: vscode.ExtensionContext) {
   menuCommands = new MenuCommands(statusBarController);
   guardPanelProvider = new GuardPanelProvider();
   scanCommands = new ScanCommands(statusBarController, guardPanelProvider);
+  guardPanelProvider.setActionHandler(async (action) => {
+    switch (action.type) {
+      case "applyFix":
+        await scanCommands.applyFix(action.issueId);
+        break;
+      case "ignoreIssue":
+        await scanCommands.ignoreIssue(action.issueId);
+        break;
+      case "applyAll":
+        await scanCommands.applyAll();
+        break;
+      case "ignoreAll":
+        await scanCommands.ignoreAll();
+        break;
+    }
+  });
 
   // Register Commands
   context.subscriptions.push(

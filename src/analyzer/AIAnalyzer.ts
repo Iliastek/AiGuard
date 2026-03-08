@@ -80,6 +80,8 @@ export class AIAnalyzer {
       "Analyze this code for bugs, security risks, maintainability issues, and suspicious AI-generated mistakes.",
       "Return JSON only in this format:",
       '{"issues":[{"line":number,"severity":"info|warning|error","message":"string","suggestedFix":"string optional","codeSnippet":"string optional"}]}',
+      "suggestedFix must be code only (no explanation, no prose, no markdown).",
+      "If you cannot provide an exact replacement snippet, omit suggestedFix.",
       "Use the line numbers from the code block below (they are prefixed as L<line>:).",
       "line must be 1-based and refer to the exact line number in that numbered code.",
       "If uncertain, set line to 0 and provide codeSnippet.",
@@ -123,6 +125,7 @@ export class AIAnalyzer {
       .map((issue, index) => {
         const line = this.resolveLine(document, issue);
         const lineText = line >= 0 ? document.lineAt(line).text : "";
+        const suggestedFix = issue.suggestedFix?.trim() || undefined;
 
         return {
           id: `ai-issue-${Date.now()}-${index}`,
@@ -133,9 +136,22 @@ export class AIAnalyzer {
           severity: issue.severity ?? "warning",
           message: `AI Guard: ${issue.message!.trim()}`,
           originalCode: lineText.trim() || issue.codeSnippet?.trim() || "",
-          suggestedFix: issue.suggestedFix?.trim() || undefined,
+          suggestedFix,
+          fix:
+            line >= 0 && suggestedFix
+              ? {
+                  type: "replace",
+                  range: {
+                    startLine: line,
+                    startColumn: 0,
+                    endLine: line,
+                    endColumn: lineText.length,
+                  },
+                  replacement: suggestedFix,
+                }
+              : undefined,
           source: "ai-generated",
-          status: "pending",
+          status: "open",
         };
       });
   }

@@ -34,8 +34,18 @@ export class CodeAnalyzer {
               /console\.(log|warn|error)\(.*?\);?/,
               "// Removed console",
             ),
+            fix: {
+              type: "delete",
+              range: {
+                startLine: index,
+                startColumn: 0,
+                endLine: index,
+                endColumn: line.length,
+              },
+              replacement: "",
+            },
             source: "analysis",
-            status: "pending",
+            status: "open",
           });
         }
       }
@@ -53,7 +63,7 @@ export class CodeAnalyzer {
           message: `AI Guard: ${todoMatch[1]} found - ${todoMatch[2].trim()}`,
           originalCode: line.trim(),
           source: "analysis",
-          status: "pending",
+          status: "open",
         });
       }
     });

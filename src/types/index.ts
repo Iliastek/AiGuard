@@ -1,3 +1,18 @@
+export type IssueStatus = "open" | "applied" | "ignored";
+
+export interface FixRange {
+  startLine: number;
+  startColumn: number;
+  endLine: number;
+  endColumn: number;
+}
+
+export interface CodeFix {
+  type: "replace" | "delete";
+  range: FixRange;
+  replacement: string;
+}
+
 export interface CodeIssue {
   id: string;
   line: number;
@@ -8,8 +23,10 @@ export interface CodeIssue {
   message: string;
   originalCode: string;
   suggestedFix?: string;
+  fix?: CodeFix;
   source: "ai-generated" | "analysis";
-  status: "pending" | "applied" | "ignored";
+  status: IssueStatus;
+  isPreviewed?: boolean;
 }
 
 export interface ScanResult {

@@ -34,7 +34,7 @@ export class AIAnalyzer {
 
     const model =
       process.env.AIGUARD_AI_MODEL?.trim() ||
-      String(config.get("aiModel", "gpt-4o-mini"));
+      String(config.get("aiModel", "GPT-5.4"));
     const endpoint =
       process.env.AIGUARD_API_ENDPOINT?.trim() ||
       String(config.get("apiEndpoint", "https://api.openai.com/v1/chat/completions"));

@@ -313,8 +313,7 @@ export class GuardPanelProvider implements vscode.WebviewViewProvider {
       const status = normalizeStatus(issue.status);
       const lineLabel = issue.line >= 0 ? "Line " + (issue.line + 1) : "Unknown line";
       const isPreviewed = Boolean(issue.isPreviewed && status === "open");
-      const canPreview = Boolean(issue.hasFix && status === "open" && !isPreviewed);
-      const canApplyPreview = Boolean(status === "open" && isPreviewed);
+      const canApply = Boolean(status === "open" && isPreviewed);
       const canIgnore = Boolean(status === "open");
       const icon = status === "applied" ? "✔" : status === "ignored" ? "○" : isPreviewed ? "🔎" : "⚠";
       const pillClass = status === "applied" ? "status-applied" : status === "ignored" ? "status-ignored" : isPreviewed ? "status-preview" : "status-open";
@@ -356,8 +355,8 @@ export class GuardPanelProvider implements vscode.WebviewViewProvider {
       const applyButton = document.createElement("button");
       applyButton.setAttribute("data-action", "applyFix");
       applyButton.setAttribute("data-issue-id", String(issue.id || ""));
-      applyButton.textContent = isPreviewed ? "Apply" : "Preview";
-      applyButton.disabled = !(canPreview || canApplyPreview);
+      applyButton.textContent = "Apply";
+      applyButton.disabled = !canApply;
       actions.appendChild(applyButton);
 
       const ignoreButton = document.createElement("button");

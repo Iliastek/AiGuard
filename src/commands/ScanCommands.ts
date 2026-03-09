@@ -49,7 +49,7 @@ export class ScanCommands {
   }
 
   public startRealtimeMonitoring(): void {
-    console.log("🛡️ AI Guard: Realtime monitoring started");
+    this.logInfo("Monitor", "Realtime monitoring started");
 
     const scanMode = this.getScanMode();
     if (scanMode !== "realtime") {
@@ -59,6 +59,11 @@ export class ScanCommands {
         scanMode === "onDemand"
           ? "🛡️ AI Guard is in On-Demand mode. Use 'Scan File Now' to run a scan."
           : "🛡️ AI Guard Pre-Commit mode is not automatic yet. Use 'Scan File Now' before committing.";
+
+      this.logInfo(
+        "Mode",
+        `Automatic Copilot-style monitoring skipped because scan mode is '${scanMode}'`,
+      );
 
       void vscode.window.showInformationMessage(modeMessage);
       return;
@@ -93,10 +98,10 @@ export class ScanCommands {
             continue;
           }
 
-          console.log("🤖 High-confidence AI code detected:", {
-            length: change.text.length,
-            lines: change.text.split("\n").length,
-          });
+          this.logInfo(
+            "Detect",
+            `Copilot-like change detected in ${this.getDocumentLabel(event.document)} (${change.text.length} chars, ${change.text.split("\n").length} lines)`,
+          );
 
           this.queuePendingAIScan(event.document);
         }
@@ -122,11 +127,11 @@ export class ScanCommands {
           return;
         }
 
-        console.log("🛡️ AI Guard scanning kept AI-generated code on save", {
-          uri: pendingScan.uri,
-          queuedVersion: pendingScan.version,
-          savedVersion: document.version,
-        });
+        const waitedMs = Date.now() - pendingScan.queuedAt;
+        this.logInfo(
+          "Scan",
+          `Saved file detected for ${this.getDocumentLabel(document)}. Running queued AI scan now (queued at version ${pendingScan.version}, saved as version ${document.version}, waited ${waitedMs}ms).`,
+        );
 
         await this.analyzeAICode(document);
       },
@@ -150,7 +155,10 @@ export class ScanCommands {
 
     this.clearPendingAIScans();
 
-    console.log("🛡️ AI Guard: Realtime monitoring stopped");
+    this.logInfo(
+      "Monitor",
+      "Realtime monitoring stopped and queued scans cleared",
+    );
     vscode.window.showInformationMessage("AI Guard monitoring paused");
   }
 
@@ -170,10 +178,10 @@ export class ScanCommands {
         languageId: document.languageId,
       });
 
-      console.log("🛡️ AI Guard queued AI-generated changes for later scan", {
-        uri: documentUri,
-        version: document.version,
-      });
+      this.logInfo(
+        "Queue",
+        `Queued ${this.getDocumentLabel(document)} for scan after save (current version ${document.version})`,
+      );
     }, 500);
 
     this.pendingScanTimeouts.set(documentUri, timeout);
@@ -182,6 +190,13 @@ export class ScanCommands {
   private clearPendingAIScans(): void {
     for (const timeout of this.pendingScanTimeouts.values()) {
       clearTimeout(timeout);
+    }
+
+    if (this.pendingAIScans.size > 0 || this.pendingScanTimeouts.size > 0) {
+      this.logInfo(
+        "Queue",
+        `Cleared ${this.pendingAIScans.size} queued scan(s) and ${this.pendingScanTimeouts.size} pending debounce timer(s)`,
+      );
     }
 
     this.pendingScanTimeouts.clear();
@@ -241,15 +256,27 @@ export class ScanCommands {
     }
 
     this.pendingAIScans.delete(documentUri);
+    this.logInfo(
+      "Queue",
+      `Removed queued scan for ${this.getDocumentLabel(document)} because a manual scan was started`,
+    );
   }
 
   private async analyzeAICode(document: vscode.TextDocument): Promise<void> {
     const requestId = ++this.analysisRequestId;
+    this.logInfo(
+      "Scan",
+      `Starting AI Guard analysis for ${this.getDocumentLabel(document)} (request ${requestId})`,
+    );
 
     try {
       const result = await this.runAnalysis(document);
 
       if (requestId !== this.analysisRequestId) {
+        this.logInfo(
+          "Scan",
+          `Discarded outdated analysis result for ${this.getDocumentLabel(document)} (request ${requestId})`,
+        );
         return;
       }
 
@@ -257,6 +284,10 @@ export class ScanCommands {
       await this.initializePreviewMode(result, document);
       this.applyIssueDecorations(document, result.issues);
       this.panelProvider.updateFromScanResult(result);
+      this.logInfo(
+        "Scan",
+        `Analysis finished for ${this.getDocumentLabel(document)} with ${result.issues.length} issue(s) in ${result.scanDuration}ms`,
+      );
 
       if (result.issues.length > 0) {
         const message = `🛡️ AI Guard found ${result.issues.length} issue(s) in AI-generated code`;
@@ -271,10 +302,16 @@ export class ScanCommands {
           this.showIssuesQuickPick(result.issues);
         }
       } else {
-        console.log("✅ AI-generated code looks good!");
+        this.logInfo(
+          "Result",
+          `No issues found in ${this.getDocumentLabel(document)}`,
+        );
       }
     } catch (error) {
-      console.error("Error analyzing AI code:", error);
+      this.logError(
+        "Scan",
+        `Error analyzing ${this.getDocumentLabel(document)}: ${String(error)}`,
+      );
     }
   }
 
@@ -303,12 +340,20 @@ export class ScanCommands {
 
     try {
       this.clearPendingAIScan(editor.document);
+      this.logInfo(
+        "Manual",
+        `Manual scan started for ${this.getDocumentLabel(editor.document)}`,
+      );
 
       const result = await this.runAnalysis(editor.document);
       this.lastScanResult = result;
       await this.initializePreviewMode(result, editor.document);
       this.applyIssueDecorations(editor.document, result.issues);
       this.panelProvider.updateFromScanResult(result);
+      this.logInfo(
+        "Manual",
+        `Manual scan finished for ${this.getDocumentLabel(editor.document)} with ${result.issues.length} issue(s)`,
+      );
 
       if (result.issues.length === 0) {
         vscode.window.showInformationMessage(
@@ -325,8 +370,34 @@ export class ScanCommands {
       this.statusBar.setState(GuardState.Error);
       this.clearIssueDecorations();
       vscode.window.showErrorMessage("AI Guard: Failed to scan current file");
-      console.error("Error scanning current file:", error);
+      this.logError(
+        "Manual",
+        `Manual scan failed for ${this.getDocumentLabel(editor.document)}: ${String(error)}`,
+      );
     }
+  }
+
+  private getDocumentLabel(document: vscode.TextDocument): string {
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (workspaceFolder) {
+      return vscode.workspace.asRelativePath(document.uri, false);
+    }
+
+    return document.uri.fsPath || document.uri.toString();
+  }
+
+  private logInfo(scope: string, message: string): void {
+    console.log(`${this.getTimestamp()} [AI Guard][${scope}] ${message}`);
+  }
+
+  private logError(scope: string, message: string): void {
+    console.error(
+      `${this.getTimestamp()} [AI Guard][${scope}] ERROR: ${message}`,
+    );
+  }
+
+  private getTimestamp(): string {
+    return new Date().toLocaleTimeString();
   }
 
   private async runAnalysis(

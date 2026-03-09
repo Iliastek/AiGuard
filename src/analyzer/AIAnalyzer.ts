@@ -37,9 +37,12 @@ export class AIAnalyzer {
       String(config.get("aiModel", "GPT-5.4"));
     const endpoint =
       process.env.AIGUARD_API_ENDPOINT?.trim() ||
-      String(config.get("apiEndpoint", "https://api.openai.com/v1/chat/completions"));
+      String(
+        config.get("apiEndpoint", "https://api.openai.com/v1/chat/completions"),
+      );
     const maxChars = Number(
-      process.env.AIGUARD_MAX_ANALYZED_CHARS || config.get("maxAnalyzedChars", 12000),
+      process.env.AIGUARD_MAX_ANALYZED_CHARS ||
+        config.get("maxAnalyzedChars", 12000),
     );
     const timeoutMs = Number(
       process.env.AIGUARD_API_TIMEOUT_MS || config.get("apiTimeoutMs", 12000),
@@ -66,7 +69,12 @@ export class AIAnalyzer {
       ],
     });
 
-    const responseText = await this.postJSON(endpoint, apiKey, payload, timeoutMs);
+    const responseText = await this.postJSON(
+      endpoint,
+      apiKey,
+      payload,
+      timeoutMs,
+    );
     const parsed = this.extractAIResponseContent(responseText);
     const aiIssues = this.parseIssuesJson(parsed);
 
@@ -121,7 +129,10 @@ export class AIAnalyzer {
     issues: AIAnalyzerIssue[],
   ): CodeIssue[] {
     return issues
-      .filter((issue) => typeof issue.message === "string" && issue.message.trim().length > 0)
+      .filter(
+        (issue) =>
+          typeof issue.message === "string" && issue.message.trim().length > 0,
+      )
       .map((issue, index) => {
         const line = this.resolveLine(document, issue);
         const lineText = line >= 0 ? document.lineAt(line).text : "";
@@ -140,7 +151,7 @@ export class AIAnalyzer {
           fix:
             line >= 0 && suggestedFix
               ? {
-                  type: "replace",
+                  type: "replace" as const,
                   range: {
                     startLine: line,
                     startColumn: 0,
@@ -150,10 +161,11 @@ export class AIAnalyzer {
                   replacement: suggestedFix,
                 }
               : undefined,
-          source: "ai-generated",
-          status: "open",
+          source: "ai-generated" as const,
+          status: "open" as const,
         };
-      });
+      })
+      .filter((issue) => issue.line >= 0); // Filter out issues with unknown line position
   }
 
   private resolveLine(
@@ -178,7 +190,10 @@ export class AIAnalyzer {
     return -1;
   }
 
-  private findLineBySnippet(document: vscode.TextDocument, snippet: string): number {
+  private findLineBySnippet(
+    document: vscode.TextDocument,
+    snippet: string,
+  ): number {
     const normalizedSnippet = this.normalizeForMatch(snippet);
 
     if (!normalizedSnippet) {
@@ -246,7 +261,9 @@ export class AIAnalyzer {
         },
       );
 
-      req.on("timeout", () => req.destroy(new Error("AI API request timed out")));
+      req.on("timeout", () =>
+        req.destroy(new Error("AI API request timed out")),
+      );
       req.on("error", (error) => reject(error));
       req.write(body);
       req.end();

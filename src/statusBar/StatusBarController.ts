@@ -43,7 +43,8 @@ export class StatusBarController {
         this.statusBarItem.text = "$(shield) AI Guard";
         this.statusBarItem.backgroundColor = undefined;
         this.statusBarItem.color = "#16a34a";
-        this.statusBarItem.tooltip = "AI Guard is active - Click for options";
+        this.statusBarItem.tooltip =
+          "AI Guard is active - Copilot-like edits are scanned after save";
         break;
 
       case GuardState.Paused:
@@ -51,7 +52,8 @@ export class StatusBarController {
         this.statusBarItem.text = "$(shield) AI Guard";
         this.statusBarItem.backgroundColor = undefined;
         this.statusBarItem.color = "#d97706";
-        this.statusBarItem.tooltip = "AI Guard is paused - Click to resume";
+        this.statusBarItem.tooltip =
+          "AI Guard is paused - Click to resume save-based Copilot scanning";
         break;
 
       case GuardState.Error:
@@ -67,7 +69,8 @@ export class StatusBarController {
         this.statusBarItem.text = "$(shield) AI Guard";
         this.statusBarItem.backgroundColor = undefined;
         this.statusBarItem.color = undefined;
-        this.statusBarItem.tooltip = "AI Guard inactive - Click to start";
+        this.statusBarItem.tooltip =
+          "AI Guard inactive - Click to watch Copilot-like edits";
     }
   }
 

@@ -95,7 +95,7 @@
         },
         "aiCodeGuard.apiTimeoutMs": {
           "type": "number",
-          "default": 12000,
+          "default": 60000,
           "minimum": 1000,
           "description": "Timeout for AI API requests in milliseconds"
         },
@@ -118,7 +118,7 @@
             "preCommit"
           ],
           "default": "realtime",
-          "description": "Code scanning mode"
+          "markdownDescription": "Code scanning mode. `realtime` watches Copilot-like edits and scans after save. `onDemand` only scans when you run **AI Guard: Scan Current File**. `preCommit` currently behaves like manual mode and reminds you to scan before commit."
         }
       }
     }

@@ -15,12 +15,12 @@ export class MenuCommands {
     if (currentState === GuardState.Active) {
       items.push({
         label: "$(debug-pause) Pause Guard",
-        description: "Stop monitoring AI-generated code",
+        description: "Stop watching Copilot-like edits and save-based scans",
       });
     } else {
       items.push({
         label: "$(play) Start Guard",
-        description: "Monitor AI-generated code (Copilot, etc.)",
+        description: "Watch Copilot-like edits and scan them after save",
       });
     }
 
@@ -40,7 +40,7 @@ export class MenuCommands {
     );
 
     const selection = await vscode.window.showQuickPick(items, {
-      placeHolder: "AI Code Guard - Copilot Monitor",
+      placeHolder: "AI Code Guard - Copilot changes are scanned after save",
     });
 
     if (!selection) {

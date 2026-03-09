@@ -9,12 +9,23 @@ import { AIAnalyzer } from "../analyzer/AIAnalyzer";
 import { CodeFix, CodeIssue, ScanResult } from "../types";
 import { GuardPanelProvider } from "../panel/GuardPanelProvider";
 
+interface PendingAIScan {
+  uri: string;
+  version: number;
+  queuedAt: number;
+  languageId: string;
+}
+
+type GuardScanMode = "realtime" | "onDemand" | "preCommit";
+
 export class ScanCommands {
   private analyzer: CodeAnalyzer;
   private aiDetector: AICodeDetector;
   private aiAnalyzer: AIAnalyzer;
   private documentChangeListener?: vscode.Disposable;
-  private analysisTimeout?: NodeJS.Timeout;
+  private documentSaveListener?: vscode.Disposable;
+  private pendingScanTimeouts = new Map<string, NodeJS.Timeout>();
+  private pendingAIScans = new Map<string, PendingAIScan>();
   private lastScanResult?: ScanResult;
   private warningDecorationType: vscode.TextEditorDecorationType;
   private analysisRequestId = 0;
@@ -40,7 +51,20 @@ export class ScanCommands {
   public startRealtimeMonitoring(): void {
     console.log("🛡️ AI Guard: Realtime monitoring started");
 
-    if (this.documentChangeListener) {
+    const scanMode = this.getScanMode();
+    if (scanMode !== "realtime") {
+      this.stopRealtimeMonitoring();
+
+      const modeMessage =
+        scanMode === "onDemand"
+          ? "🛡️ AI Guard is in On-Demand mode. Use 'Scan File Now' to run a scan."
+          : "🛡️ AI Guard Pre-Commit mode is not automatic yet. Use 'Scan File Now' before committing.";
+
+      void vscode.window.showInformationMessage(modeMessage);
+      return;
+    }
+
+    if (this.documentChangeListener || this.documentSaveListener) {
       return;
     }
 
@@ -51,14 +75,12 @@ export class ScanCommands {
           return;
         }
 
-        // Nur aktiv wenn Guard läuft
-        if (this.statusBar.getState() !== GuardState.Active) {
+        if (!this.shouldAutoMonitorDocument(event.document)) {
           return;
         }
 
-        // Nur für unterstützte Sprachen
-        const languageId = event.document.languageId;
-        if (!this.isSupportedLanguage(languageId)) {
+        // Nur aktiv wenn Guard läuft
+        if (this.statusBar.getState() !== GuardState.Active) {
           return;
         }
 
@@ -76,20 +98,42 @@ export class ScanCommands {
             lines: change.text.split("\n").length,
           });
 
-          // Debounce: Warte 500ms bevor Analyse startet
-          if (this.analysisTimeout) {
-            clearTimeout(this.analysisTimeout);
-          }
-
-          this.analysisTimeout = setTimeout(async () => {
-            await this.analyzeAICode(event.document);
-          }, 500);
+          this.queuePendingAIScan(event.document);
         }
       },
     );
 
+    this.documentSaveListener = vscode.workspace.onDidSaveTextDocument(
+      async (document) => {
+        if (this.suppressDocumentEvents) {
+          return;
+        }
+
+        if (!this.shouldAutoMonitorDocument(document)) {
+          return;
+        }
+
+        if (this.statusBar.getState() !== GuardState.Active) {
+          return;
+        }
+
+        const pendingScan = this.consumePendingAIScan(document);
+        if (!pendingScan) {
+          return;
+        }
+
+        console.log("🛡️ AI Guard scanning kept AI-generated code on save", {
+          uri: pendingScan.uri,
+          queuedVersion: pendingScan.version,
+          savedVersion: document.version,
+        });
+
+        await this.analyzeAICode(document);
+      },
+    );
+
     vscode.window.showInformationMessage(
-      "🛡️ AI Guard is now monitoring AI-generated code",
+      "🛡️ AI Guard is watching Copilot-like edits and will scan them after save",
     );
   }
 
@@ -99,17 +143,107 @@ export class ScanCommands {
       this.documentChangeListener = undefined;
     }
 
-    if (this.analysisTimeout) {
-      clearTimeout(this.analysisTimeout);
+    if (this.documentSaveListener) {
+      this.documentSaveListener.dispose();
+      this.documentSaveListener = undefined;
     }
+
+    this.clearPendingAIScans();
 
     console.log("🛡️ AI Guard: Realtime monitoring stopped");
     vscode.window.showInformationMessage("AI Guard monitoring paused");
   }
 
-  private async analyzeAICode(
+  private queuePendingAIScan(document: vscode.TextDocument): void {
+    const documentUri = document.uri.toString();
+    const existingTimeout = this.pendingScanTimeouts.get(documentUri);
+    if (existingTimeout) {
+      clearTimeout(existingTimeout);
+    }
+
+    const timeout = setTimeout(() => {
+      this.pendingScanTimeouts.delete(documentUri);
+      this.pendingAIScans.set(documentUri, {
+        uri: documentUri,
+        version: document.version,
+        queuedAt: Date.now(),
+        languageId: document.languageId,
+      });
+
+      console.log("🛡️ AI Guard queued AI-generated changes for later scan", {
+        uri: documentUri,
+        version: document.version,
+      });
+    }, 500);
+
+    this.pendingScanTimeouts.set(documentUri, timeout);
+  }
+
+  private clearPendingAIScans(): void {
+    for (const timeout of this.pendingScanTimeouts.values()) {
+      clearTimeout(timeout);
+    }
+
+    this.pendingScanTimeouts.clear();
+    this.pendingAIScans.clear();
+  }
+
+  private shouldAutoMonitorDocument(document: vscode.TextDocument): boolean {
+    if (this.statusBar.getState() !== GuardState.Active) {
+      return false;
+    }
+
+    if (this.getScanMode() !== "realtime") {
+      return false;
+    }
+
+    if (document.uri.scheme !== "file") {
+      return false;
+    }
+
+    return this.isSupportedLanguage(document.languageId);
+  }
+
+  private getScanMode(): GuardScanMode {
+    const config = vscode.workspace.getConfiguration("aiCodeGuard");
+    const scanMode = config.get<string>("scanMode", "realtime");
+
+    if (
+      scanMode === "realtime" ||
+      scanMode === "onDemand" ||
+      scanMode === "preCommit"
+    ) {
+      return scanMode;
+    }
+
+    return "realtime";
+  }
+
+  private consumePendingAIScan(
     document: vscode.TextDocument,
-  ): Promise<void> {
+  ): PendingAIScan | undefined {
+    const documentUri = document.uri.toString();
+    const pendingScan = this.pendingAIScans.get(documentUri);
+    if (!pendingScan) {
+      return undefined;
+    }
+
+    this.pendingAIScans.delete(documentUri);
+    return pendingScan;
+  }
+
+  private clearPendingAIScan(document: vscode.TextDocument): void {
+    const documentUri = document.uri.toString();
+    const pendingTimeout = this.pendingScanTimeouts.get(documentUri);
+    if (pendingTimeout) {
+      clearTimeout(pendingTimeout);
+      this.pendingScanTimeouts.delete(documentUri);
+    }
+
+    this.pendingAIScans.delete(documentUri);
+  }
+
+  private async analyzeAICode(document: vscode.TextDocument): Promise<void> {
     const requestId = ++this.analysisRequestId;
 
     try {
@@ -168,6 +302,8 @@ export class ScanCommands {
     }
 
     try {
+      this.clearPendingAIScan(editor.document);
+
       const result = await this.runAnalysis(editor.document);
       this.lastScanResult = result;
       await this.initializePreviewMode(result, editor.document);
@@ -236,7 +372,9 @@ export class ScanCommands {
       return;
     }
 
-    const issue = this.lastScanResult.issues.find((item) => item.id === issueId);
+    const issue = this.lastScanResult.issues.find(
+      (item) => item.id === issueId,
+    );
     if (!issue || issue.status !== "open" || !issue.isPreviewed) {
       return;
     }
@@ -256,7 +394,9 @@ export class ScanCommands {
       return;
     }
 
-    const issue = this.lastScanResult.issues.find((item) => item.id === issueId);
+    const issue = this.lastScanResult.issues.find(
+      (item) => item.id === issueId,
+    );
     if (!issue || issue.status !== "open") {
       return;
     }
@@ -292,7 +432,9 @@ export class ScanCommands {
 
     await this.rebuildPreviewDocument(document);
     if (appliedCount > 0) {
-      vscode.window.showInformationMessage(`AI Guard: Apply All finished (${appliedCount} applied)`);
+      vscode.window.showInformationMessage(
+        `AI Guard: Apply All finished (${appliedCount} applied)`,
+      );
     }
   }
 
@@ -327,7 +469,10 @@ export class ScanCommands {
 
     for (const issue of result.issues) {
       issue.fix = this.resolveFixForIssue(issue);
-      issue.isPreviewed = issue.status === "open" && Boolean(issue.fix);
+      // Errors and warnings get previewed in the editor; info is webview-only
+      issue.isPreviewed =
+        issue.status === "open" &&
+        (issue.severity === "error" || issue.severity === "warning");
     }
 
     const previewText = this.buildPreviewText(result.issues);
@@ -341,7 +486,9 @@ export class ScanCommands {
     }
   }
 
-  private async rebuildPreviewDocument(document: vscode.TextDocument): Promise<void> {
+  private async rebuildPreviewDocument(
+    document: vscode.TextDocument,
+  ): Promise<void> {
     if (!this.lastScanResult || !this.previewBaseline) {
       return;
     }
@@ -356,7 +503,9 @@ export class ScanCommands {
 
     const applied = await this.replaceDocumentText(document, text);
     if (!applied) {
-      vscode.window.showErrorMessage("AI Guard: Failed to update preview state");
+      vscode.window.showErrorMessage(
+        "AI Guard: Failed to update preview state",
+      );
       return;
     }
 
@@ -373,10 +522,12 @@ export class ScanCommands {
     const baseText = this.previewBaseline.text;
     const workingIssues = issues.filter(
       (issue) =>
-        (issue.status === "open" && issue.isPreviewed) || issue.status === "applied",
+        (issue.status === "open" && issue.isPreviewed) ||
+        issue.status === "applied",
     );
 
-    const replacements: Array<{ start: number; end: number; text: string }> = [];
+    const replacements: Array<{ start: number; end: number; text: string }> =
+      [];
 
     for (const issue of workingIssues) {
       issue.fix = this.resolveFixForIssue(issue);
@@ -429,7 +580,9 @@ export class ScanCommands {
     return true;
   }
 
-  private async openPreviewDocument(): Promise<vscode.TextDocument | undefined> {
+  private async openPreviewDocument(): Promise<
+    vscode.TextDocument | undefined
+  > {
     if (!this.lastScanResult) {
       return undefined;
     }
@@ -439,7 +592,9 @@ export class ScanCommands {
         vscode.Uri.parse(this.lastScanResult.fileUri),
       );
     } catch {
-      vscode.window.showErrorMessage("AI Guard: Could not open file for preview updates");
+      vscode.window.showErrorMessage(
+        "AI Guard: Could not open file for preview updates",
+      );
       return undefined;
     }
   }
@@ -519,6 +674,11 @@ export class ScanCommands {
   }
 
   private resolveFixForIssue(issue: CodeIssue): CodeFix | undefined {
+    // Info issues should not have fixes
+    if (issue.severity === "info") {
+      return undefined;
+    }
+
     if (issue.fix) {
       return issue.fix;
     }
@@ -587,7 +747,11 @@ export class ScanCommands {
       return true;
     }
 
-    if (/^(initialize|use|change|consider|replace|set|add|remove|update)\b/i.test(normalized)) {
+    if (
+      /^(initialize|use|change|consider|replace|set|add|remove|update)\b/i.test(
+        normalized,
+      )
+    ) {
       return true;
     }
 
@@ -639,7 +803,8 @@ export class ScanCommands {
     issues: CodeIssue[],
   ): void {
     const editor = vscode.window.visibleTextEditors.find(
-      (candidate) => candidate.document.uri.toString() === document.uri.toString(),
+      (candidate) =>
+        candidate.document.uri.toString() === document.uri.toString(),
     );
 
     if (!editor) {
@@ -658,10 +823,33 @@ export class ScanCommands {
         continue;
       }
 
+      // Mark errors and warnings in the editor; info is shown in the webview panel only
+      if (issue.severity === "info") {
+        continue;
+      }
+
       const lineRange = document.lineAt(issue.line).range;
+
+      // Build hover content: show original code when issue is previewed
+      const hoverParts: vscode.MarkdownString[] = [];
+
+      const messageMd = new vscode.MarkdownString(
+        `**\u26a0\ufe0f Guard:** ${issue.message}`,
+      );
+      messageMd.isTrusted = true;
+      hoverParts.push(messageMd);
+
+      if (issue.isPreviewed && issue.originalCode) {
+        const originalMd = new vscode.MarkdownString();
+        originalMd.isTrusted = true;
+        originalMd.appendMarkdown("**Original Code:**\n");
+        originalMd.appendCodeblock(issue.originalCode, document.languageId);
+        hoverParts.push(originalMd);
+      }
+
       decorations.push({
         range: lineRange,
-        hoverMessage: `Guard Suggestion: ${issue.message}`,
+        hoverMessage: hoverParts,
       });
     }
 

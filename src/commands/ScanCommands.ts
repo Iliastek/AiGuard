@@ -6,8 +6,10 @@ import {
 import { CodeAnalyzer } from "../analyzer/CodeAnalyzer";
 import { AICodeDetector } from "../analyzer/AICodeDetector";
 import { AIAnalyzer } from "../analyzer/AIAnalyzer";
-import { CodeFix, CodeIssue, ScanResult } from "../types";
+import { CodeIssue, ScanResult } from "../types";
 import { GuardPanelProvider } from "../panel/GuardPanelProvider";
+import { ScanPreviewService } from "./ScanPreviewService";
+import { IssueDecorationController } from "./IssueDecorationController";
 
 interface PendingAIScan {
   uri: string;
@@ -18,19 +20,45 @@ interface PendingAIScan {
 
 type GuardScanMode = "realtime" | "onDemand" | "preCommit";
 
+const AI_GUARD_CONFIG_SECTION = "aiCodeGuard";
+const DEFAULT_SCAN_MODE: GuardScanMode = "realtime";
+const REALTIME_SCAN_MODE: GuardScanMode = "realtime";
+const ON_DEMAND_SCAN_MODE: GuardScanMode = "onDemand";
+const PRE_COMMIT_SCAN_MODE: GuardScanMode = "preCommit";
+const AI_SCAN_DEBOUNCE_MS = 500;
+
+const SUPPORTED_LANGUAGES = [
+  "javascript",
+  "typescript",
+  "javascriptreact",
+  "typescriptreact",
+  "python",
+  "java",
+  "csharp",
+  "cpp",
+  "go",
+  "rust",
+];
+
+type ScanNotificationMode = "automatic" | "manual";
+
+interface ScanProcessingOptions {
+  notificationMode: ScanNotificationMode;
+  logScope: "Scan" | "Manual";
+}
+
 export class ScanCommands {
   private analyzer: CodeAnalyzer;
   private aiDetector: AICodeDetector;
   private aiAnalyzer: AIAnalyzer;
+  private previewService: ScanPreviewService;
+  private decorationController: IssueDecorationController;
   private documentChangeListener?: vscode.Disposable;
   private documentSaveListener?: vscode.Disposable;
   private pendingScanTimeouts = new Map<string, NodeJS.Timeout>();
   private pendingAIScans = new Map<string, PendingAIScan>();
   private lastScanResult?: ScanResult;
-  private warningDecorationType: vscode.TextEditorDecorationType;
   private analysisRequestId = 0;
-  private previewBaseline?: { uri: string; text: string };
-  private lastRenderedPreviewText?: string;
   private suppressDocumentEvents = false;
 
   constructor(
@@ -40,25 +68,20 @@ export class ScanCommands {
     this.analyzer = new CodeAnalyzer();
     this.aiDetector = new AICodeDetector();
     this.aiAnalyzer = new AIAnalyzer();
-    this.warningDecorationType = vscode.window.createTextEditorDecorationType({
-      backgroundColor: "rgba(255, 200, 0, 0.25)",
-      isWholeLine: true,
-      overviewRulerColor: "rgba(255, 200, 0, 0.7)",
-      overviewRulerLane: vscode.OverviewRulerLane.Right,
-    });
+    this.previewService = new ScanPreviewService((document, text) =>
+      this.replaceDocumentText(document, text),
+    );
+    this.decorationController = new IssueDecorationController();
   }
 
   public startRealtimeMonitoring(): void {
     this.logInfo("Monitor", "Realtime monitoring started");
 
     const scanMode = this.getScanMode();
-    if (scanMode !== "realtime") {
+    if (scanMode !== REALTIME_SCAN_MODE) {
       this.stopRealtimeMonitoring();
 
-      const modeMessage =
-        scanMode === "onDemand"
-          ? "🛡️ AI Guard is in On-Demand mode. Use 'Scan File Now' to run a scan."
-          : "🛡️ AI Guard Pre-Commit mode is not automatic yet. Use 'Scan File Now' before committing.";
+      const modeMessage = this.getScanModeInformationMessage(scanMode);
 
       this.logInfo(
         "Mode",
@@ -182,7 +205,7 @@ export class ScanCommands {
         "Queue",
         `Queued ${this.getDocumentLabel(document)} for scan after save (current version ${document.version})`,
       );
-    }, 500);
+    }, AI_SCAN_DEBOUNCE_MS);
 
     this.pendingScanTimeouts.set(documentUri, timeout);
   }
@@ -208,7 +231,7 @@ export class ScanCommands {
       return false;
     }
 
-    if (this.getScanMode() !== "realtime") {
+    if (this.getScanMode() !== REALTIME_SCAN_MODE) {
       return false;
     }
 
@@ -220,18 +243,14 @@ export class ScanCommands {
   }
 
   private getScanMode(): GuardScanMode {
-    const config = vscode.workspace.getConfiguration("aiCodeGuard");
-    const scanMode = config.get<string>("scanMode", "realtime");
+    const config = vscode.workspace.getConfiguration(AI_GUARD_CONFIG_SECTION);
+    const scanMode = config.get<string>("scanMode", DEFAULT_SCAN_MODE);
 
-    if (
-      scanMode === "realtime" ||
-      scanMode === "onDemand" ||
-      scanMode === "preCommit"
-    ) {
+    if (this.isGuardScanMode(scanMode)) {
       return scanMode;
     }
 
-    return "realtime";
+    return DEFAULT_SCAN_MODE;
   }
 
   private consumePendingAIScan(
@@ -280,33 +299,14 @@ export class ScanCommands {
         return;
       }
 
-      this.lastScanResult = result;
-      await this.initializePreviewMode(result, document);
-      this.applyIssueDecorations(document, result.issues);
-      this.panelProvider.updateFromScanResult(result);
+      await this.processScanResult(document, result, {
+        notificationMode: "automatic",
+        logScope: "Scan",
+      });
       this.logInfo(
         "Scan",
         `Analysis finished for ${this.getDocumentLabel(document)} with ${result.issues.length} issue(s) in ${result.scanDuration}ms`,
       );
-
-      if (result.issues.length > 0) {
-        const message = `🛡️ AI Guard found ${result.issues.length} issue(s) in AI-generated code`;
-
-        const action = await vscode.window.showWarningMessage(
-          message,
-          "View Issues",
-          "Ignore",
-        );
-
-        if (action === "View Issues") {
-          this.showIssuesQuickPick(result.issues);
-        }
-      } else {
-        this.logInfo(
-          "Result",
-          `No issues found in ${this.getDocumentLabel(document)}`,
-        );
-      }
     } catch (error) {
       this.logError(
         "Scan",
@@ -346,26 +346,14 @@ export class ScanCommands {
       );
 
       const result = await this.runAnalysis(editor.document);
-      this.lastScanResult = result;
-      await this.initializePreviewMode(result, editor.document);
-      this.applyIssueDecorations(editor.document, result.issues);
-      this.panelProvider.updateFromScanResult(result);
+      await this.processScanResult(editor.document, result, {
+        notificationMode: "manual",
+        logScope: "Manual",
+      });
       this.logInfo(
         "Manual",
         `Manual scan finished for ${this.getDocumentLabel(editor.document)} with ${result.issues.length} issue(s)`,
       );
-
-      if (result.issues.length === 0) {
-        vscode.window.showInformationMessage(
-          "AI Guard: No issues found in current file",
-        );
-        return;
-      }
-
-      vscode.window.showWarningMessage(
-        `AI Guard: Found ${result.issues.length} issue(s) in current file`,
-      );
-      this.showIssuesQuickPick(result.issues);
     } catch (error) {
       this.statusBar.setState(GuardState.Error);
       this.clearIssueDecorations();
@@ -398,6 +386,92 @@ export class ScanCommands {
 
   private getTimestamp(): string {
     return new Date().toLocaleTimeString();
+  }
+
+  private isGuardScanMode(value: string): value is GuardScanMode {
+    return (
+      value === REALTIME_SCAN_MODE ||
+      value === ON_DEMAND_SCAN_MODE ||
+      value === PRE_COMMIT_SCAN_MODE
+    );
+  }
+
+  private getScanModeInformationMessage(scanMode: GuardScanMode): string {
+    if (scanMode === ON_DEMAND_SCAN_MODE) {
+      return "🛡️ AI Guard is in On-Demand mode. Use 'Scan File Now' to run a scan.";
+    }
+
+    return "🛡️ AI Guard Pre-Commit mode is not automatic yet. Use 'Scan File Now' before committing.";
+  }
+
+  private async processScanResult(
+    document: vscode.TextDocument,
+    result: ScanResult,
+    options: ScanProcessingOptions,
+  ): Promise<void> {
+    this.lastScanResult = result;
+    await this.initializePreviewMode(result, document);
+    this.applyIssueDecorations(document, result.issues);
+    this.panelProvider.updateFromScanResult(result);
+    await this.notifyScanResult(document, result, options);
+  }
+
+  private async notifyScanResult(
+    document: vscode.TextDocument,
+    result: ScanResult,
+    options: ScanProcessingOptions,
+  ): Promise<void> {
+    if (options.notificationMode === "manual") {
+      await this.notifyManualScanResult(result);
+      return;
+    }
+
+    await this.notifyAutomaticScanResult(document, result, options.logScope);
+  }
+
+  private async notifyAutomaticScanResult(
+    document: vscode.TextDocument,
+    result: ScanResult,
+    logScope: "Scan" | "Manual",
+  ): Promise<void> {
+    if (result.issues.length === 0) {
+      this.logInfo(
+        "Result",
+        `No issues found in ${this.getDocumentLabel(document)}`,
+      );
+      return;
+    }
+
+    const message = `🛡️ AI Guard found ${result.issues.length} issue(s) in AI-generated code`;
+    const action = await vscode.window.showWarningMessage(
+      message,
+      "View Issues",
+      "Ignore",
+    );
+
+    if (action === "View Issues") {
+      this.showIssuesQuickPick(result.issues);
+      return;
+    }
+
+    this.logInfo(
+      logScope,
+      `Issue dialog dismissed for ${this.getDocumentLabel(document)}`,
+    );
+  }
+
+  private async notifyManualScanResult(result: ScanResult): Promise<void> {
+    if (result.issues.length === 0) {
+      await vscode.window.showInformationMessage(
+        "AI Guard: No issues found in current file",
+      );
+      return;
+    }
+
+    await vscode.window.showWarningMessage(
+      `AI Guard: Found ${result.issues.length} issue(s) in current file`,
+    );
+    this.showIssuesQuickPick(result.issues);
   }
 
   private async runAnalysis(
@@ -533,141 +607,49 @@ export class ScanCommands {
     result: ScanResult,
     document: vscode.TextDocument,
   ): Promise<void> {
-    this.previewBaseline = {
-      uri: result.fileUri,
-      text: document.getText(),
-    };
-
-    for (const issue of result.issues) {
-      issue.fix = this.resolveFixForIssue(issue);
-      // Errors and warnings get previewed in the editor; info is webview-only
-      issue.isPreviewed =
-        issue.status === "open" &&
-        (issue.severity === "error" || issue.severity === "warning");
-    }
-
-    const previewText = this.buildPreviewText(result.issues);
-    if (previewText === undefined) {
-      return;
-    }
-
-    const applied = await this.replaceDocumentText(document, previewText);
-    if (applied) {
-      this.lastRenderedPreviewText = previewText;
-    }
+    await this.previewService.initializePreviewMode(result, document);
   }
 
   private async rebuildPreviewDocument(
     document: vscode.TextDocument,
   ): Promise<void> {
-    if (!this.lastScanResult || !this.previewBaseline) {
+    if (!this.lastScanResult) {
       return;
     }
 
-    const text = this.buildPreviewText(this.lastScanResult.issues);
-    if (text === undefined) {
+    const rebuildResult = await this.previewService.rebuildPreviewDocument(
+      document,
+      this.lastScanResult.issues,
+    );
+
+    if (rebuildResult === "invalid-fix-ranges") {
       vscode.window.showWarningMessage(
         "AI Guard: Could not rebuild preview due to invalid fix ranges",
       );
       return;
     }
 
-    const applied = await this.replaceDocumentText(document, text);
-    if (!applied) {
+    if (rebuildResult === "apply-failed") {
       vscode.window.showErrorMessage(
         "AI Guard: Failed to update preview state",
       );
       return;
     }
 
-    this.lastRenderedPreviewText = text;
     await this.refreshFileDecorations();
     this.panelProvider.updateFromScanResult(this.lastScanResult);
   }
 
-  private buildPreviewText(issues: CodeIssue[]): string | undefined {
-    if (!this.previewBaseline) {
-      return undefined;
-    }
-
-    const baseText = this.previewBaseline.text;
-    const workingIssues = issues.filter(
-      (issue) =>
-        (issue.status === "open" && issue.isPreviewed) ||
-        issue.status === "applied",
-    );
-
-    const replacements: Array<{ start: number; end: number; text: string }> =
-      [];
-
-    for (const issue of workingIssues) {
-      issue.fix = this.resolveFixForIssue(issue);
-      if (!issue.fix) {
-        continue;
-      }
-
-      const offsets = this.getOffsetsForFix(this.previewBaseline.text, issue);
-      if (!offsets) {
-        return undefined;
-      }
-
-      replacements.push({
-        start: offsets.start,
-        end: offsets.end,
-        text: issue.fix.type === "delete" ? "" : issue.fix.replacement,
-      });
-    }
-
-    replacements.sort((a, b) => b.start - a.start);
-
-    let nextStart = Number.POSITIVE_INFINITY;
-    let output = baseText;
-    for (const replacement of replacements) {
-      if (replacement.end > nextStart) {
-        continue;
-      }
-      output =
-        output.slice(0, replacement.start) +
-        replacement.text +
-        output.slice(replacement.end);
-      nextStart = replacement.start;
-    }
-
-    return output;
-  }
-
   private ensurePreviewSync(document: vscode.TextDocument): boolean {
-    if (!this.lastRenderedPreviewText) {
-      return true;
-    }
-
-    if (document.getText() !== this.lastRenderedPreviewText) {
-      vscode.window.showWarningMessage(
-        "AI Guard: File changed after preview. Please run a new scan.",
-      );
-      return false;
-    }
-
-    return true;
+    return this.previewService.ensurePreviewSync(document);
   }
 
   private async openPreviewDocument(): Promise<
     vscode.TextDocument | undefined
   > {
-    if (!this.lastScanResult) {
-      return undefined;
-    }
-
-    try {
-      return await vscode.workspace.openTextDocument(
-        vscode.Uri.parse(this.lastScanResult.fileUri),
-      );
-    } catch {
-      vscode.window.showErrorMessage(
-        "AI Guard: Could not open file for preview updates",
-      );
-      return undefined;
-    }
+    return this.previewService.openPreviewDocument(
+      this.lastScanResult?.fileUri,
+    );
   }
 
   private async replaceDocumentText(
@@ -692,266 +674,28 @@ export class ScanCommands {
     }
   }
 
-  private getOffsetsForFix(
-    baseText: string,
-    issue: CodeIssue,
-  ): { start: number; end: number } | undefined {
-    if (!issue.fix) {
-      return undefined;
-    }
-
-    const lines = baseText.split("\n");
-    const lineStarts: number[] = [];
-    let offset = 0;
-    for (const line of lines) {
-      lineStarts.push(offset);
-      offset += line.length + 1;
-    }
-
-    const { startLine, startColumn, endLine, endColumn } = issue.fix.range;
-    if (
-      startLine < 0 ||
-      endLine < startLine ||
-      startLine >= lines.length ||
-      endLine >= lines.length
-    ) {
-      return undefined;
-    }
-
-    if (
-      startColumn < 0 ||
-      endColumn < 0 ||
-      startColumn > lines[startLine].length ||
-      endColumn > lines[endLine].length
-    ) {
-      return undefined;
-    }
-
-    if (issue.fix.type === "delete" && startLine === endLine) {
-      const start = lineStarts[startLine];
-      const end =
-        startLine + 1 < lines.length
-          ? lineStarts[startLine + 1]
-          : lineStarts[startLine] + lines[startLine].length;
-      return { start, end };
-    }
-
-    const start = lineStarts[startLine] + startColumn;
-    const end = lineStarts[endLine] + endColumn;
-    if (end < start) {
-      return undefined;
-    }
-    return { start, end };
-  }
-
-  private resolveFixForIssue(issue: CodeIssue): CodeFix | undefined {
-    // Info issues should not have fixes
-    if (issue.severity === "info") {
-      return undefined;
-    }
-
-    if (issue.fix) {
-      return issue.fix;
-    }
-
-    const fallbackReplacement = this.deriveReplacementFromSuggestion(
-      issue.suggestedFix,
-      issue.originalCode,
-    );
-    if (!fallbackReplacement || issue.line < 0) {
-      return undefined;
-    }
-
-    return {
-      type: "replace",
-      range: {
-        startLine: issue.line,
-        startColumn: 0,
-        endLine: issue.endLine >= issue.line ? issue.endLine : issue.line,
-        endColumn: Math.max(issue.endColumn, issue.column + 1),
-      },
-      replacement: fallbackReplacement,
-    };
-  }
-
-  private deriveReplacementFromSuggestion(
-    suggestion: string | undefined,
-    originalCode: string,
-  ): string | undefined {
-    const raw = suggestion?.trim();
-    if (!raw) {
-      return undefined;
-    }
-
-    if (!this.looksLikeInstruction(raw)) {
-      return raw;
-    }
-
-    // Pattern: "Change 'old' to 'new'."
-    const changeMatch = raw.match(
-      /change\s+['"`](.+?)['"`]\s+to\s+['"`](.+?)['"`]/i,
-    );
-    if (changeMatch) {
-      const from = changeMatch[1];
-      const to = changeMatch[2];
-      if (originalCode.includes(from)) {
-        return originalCode.replace(from, to);
-      }
-      return originalCode.replace(new RegExp(this.escapeRegExp(from), "g"), to);
-    }
-
-    // Pattern: "...: actual code"
-    const colonIndex = raw.indexOf(":");
-    if (colonIndex >= 0 && colonIndex < raw.length - 1) {
-      const tail = raw.slice(colonIndex + 1).trim();
-      if (tail && !this.looksLikeInstruction(tail)) {
-        return tail;
-      }
-    }
-
-    return undefined;
-  }
-
-  private looksLikeInstruction(text: string): boolean {
-    const normalized = text.trim();
-    if (!normalized) {
-      return true;
-    }
-
-    if (
-      /^(initialize|use|change|consider|replace|set|add|remove|update)\b/i.test(
-        normalized,
-      )
-    ) {
-      return true;
-    }
-
-    if (/\b(instead of|such as|for example)\b/i.test(normalized)) {
-      return true;
-    }
-
-    // Natural language sentence ending with period and spaces is likely prose.
-    if (normalized.endsWith(".") && /\s/.test(normalized)) {
-      return true;
-    }
-
-    return false;
-  }
-
-  private escapeRegExp(value: string): string {
-    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  }
-
   private async refreshFileDecorations(): Promise<void> {
-    if (!this.lastScanResult) {
-      return;
-    }
-
-    const openEditor = vscode.window.visibleTextEditors.find(
-      (editor) =>
-        editor.document.uri.toString() === this.lastScanResult?.fileUri,
-    );
-
-    if (openEditor) {
-      this.applyIssueDecorations(
-        openEditor.document,
-        this.lastScanResult.issues.filter((issue) => issue.status === "open"),
-      );
-      return;
-    }
-
-    const document = await vscode.workspace.openTextDocument(
-      vscode.Uri.parse(this.lastScanResult.fileUri),
-    );
-    this.applyIssueDecorations(
-      document,
-      this.lastScanResult.issues.filter((issue) => issue.status === "open"),
-    );
+    await this.decorationController.refreshFileDecorations(this.lastScanResult);
   }
 
   private applyIssueDecorations(
     document: vscode.TextDocument,
     issues: CodeIssue[],
   ): void {
-    const editor = vscode.window.visibleTextEditors.find(
-      (candidate) =>
-        candidate.document.uri.toString() === document.uri.toString(),
-    );
-
-    if (!editor) {
-      return;
-    }
-
-    if (issues.length === 0) {
-      editor.setDecorations(this.warningDecorationType, []);
-      return;
-    }
-
-    const decorations: vscode.DecorationOptions[] = [];
-
-    for (const issue of issues) {
-      if (issue.line < 0 || issue.line >= document.lineCount) {
-        continue;
-      }
-
-      // Mark errors and warnings in the editor; info is shown in the webview panel only
-      if (issue.severity === "info") {
-        continue;
-      }
-
-      const lineRange = document.lineAt(issue.line).range;
-
-      // Build hover content: show original code when issue is previewed
-      const hoverParts: vscode.MarkdownString[] = [];
-
-      const messageMd = new vscode.MarkdownString(
-        `**\u26a0\ufe0f Guard:** ${issue.message}`,
-      );
-      messageMd.isTrusted = true;
-      hoverParts.push(messageMd);
-
-      if (issue.isPreviewed && issue.originalCode) {
-        const originalMd = new vscode.MarkdownString();
-        originalMd.isTrusted = true;
-        originalMd.appendMarkdown("**Original Code:**\n");
-        originalMd.appendCodeblock(issue.originalCode, document.languageId);
-        hoverParts.push(originalMd);
-      }
-
-      decorations.push({
-        range: lineRange,
-        hoverMessage: hoverParts,
-      });
-    }
-
-    editor.setDecorations(this.warningDecorationType, decorations);
+    this.decorationController.applyIssueDecorations(document, issues);
   }
 
   private clearIssueDecorations(): void {
-    for (const editor of vscode.window.visibleTextEditors) {
-      editor.setDecorations(this.warningDecorationType, []);
-    }
+    this.decorationController.clearIssueDecorations();
   }
 
   private isSupportedLanguage(languageId: string): boolean {
-    const supported = [
-      "javascript",
-      "typescript",
-      "javascriptreact",
-      "typescriptreact",
-      "python",
-      "java",
-      "csharp",
-      "cpp",
-      "go",
-      "rust",
-    ];
-    return supported.includes(languageId);
+    return SUPPORTED_LANGUAGES.includes(languageId);
   }
 
   public dispose(): void {
     this.stopRealtimeMonitoring();
     this.clearIssueDecorations();
-    this.warningDecorationType.dispose();
+    this.decorationController.dispose();
   }
 }

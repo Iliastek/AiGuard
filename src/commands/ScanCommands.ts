@@ -10,6 +10,7 @@ import { CodeIssue, ScanResult } from "../types";
 import { GuardPanelProvider } from "../panel/GuardPanelProvider";
 import { ScanPreviewService } from "./ScanPreviewService";
 import { IssueDecorationController } from "./IssueDecorationController";
+import { ScanPipelineService } from "./ScanPipelineService";
 
 interface PendingAIScan {
   uri: string;
@@ -51,6 +52,7 @@ export class ScanCommands {
   private analyzer: CodeAnalyzer;
   private aiDetector: AICodeDetector;
   private aiAnalyzer: AIAnalyzer;
+  private pipelineService: ScanPipelineService;
   private previewService: ScanPreviewService;
   private decorationController: IssueDecorationController;
   private documentChangeListener?: vscode.Disposable;
@@ -68,6 +70,7 @@ export class ScanCommands {
     this.analyzer = new CodeAnalyzer();
     this.aiDetector = new AICodeDetector();
     this.aiAnalyzer = new AIAnalyzer();
+    this.pipelineService = new ScanPipelineService();
     this.previewService = new ScanPreviewService((document, text) =>
       this.replaceDocumentText(document, text),
     );
@@ -478,16 +481,19 @@ export class ScanCommands {
     document: vscode.TextDocument,
   ): Promise<ScanResult> {
     const localResult = await this.analyzer.analyzeDocument(document);
+    const finalizeResult = async (
+      issues: CodeIssue[],
+    ): Promise<ScanResult> => ({
+      ...localResult,
+      issues: await this.pipelineService.processIssues(document, issues),
+    });
 
     try {
       const aiIssues = await this.aiAnalyzer.analyzeWithAPI(document);
-      return {
-        ...localResult,
-        issues: [...localResult.issues, ...aiIssues],
-      };
+      return finalizeResult([...localResult.issues, ...aiIssues]);
     } catch (error) {
       console.warn("AI API analysis failed, using local analysis only:", error);
-      return localResult;
+      return finalizeResult(localResult.issues);
     }
   }
 
@@ -520,7 +526,7 @@ export class ScanCommands {
     const issue = this.lastScanResult.issues.find(
       (item) => item.id === issueId,
     );
-    if (!issue || issue.status !== "open" || !issue.isPreviewed) {
+    if (!issue || !this.canApplyIssue(issue)) {
       return;
     }
 
@@ -556,6 +562,24 @@ export class ScanCommands {
     await this.rebuildPreviewDocument(document);
   }
 
+  public async viewRecommendation(issueId: string): Promise<void> {
+    if (!this.lastScanResult) {
+      return;
+    }
+
+    const issue = this.lastScanResult.issues.find(
+      (item) => item.id === issueId,
+    );
+    if (!issue) {
+      return;
+    }
+
+    const detail =
+      issue.recommendation ||
+      "No structured recommendation is available for this issue yet.";
+    await vscode.window.showInformationMessage(detail, { modal: true }, "OK");
+  }
+
   public async applyAll(): Promise<void> {
     if (!this.lastScanResult) {
       return;
@@ -568,7 +592,7 @@ export class ScanCommands {
 
     let appliedCount = 0;
     for (const issue of this.lastScanResult.issues) {
-      if (issue.status === "open" && issue.isPreviewed) {
+      if (this.canApplyIssue(issue)) {
         issue.isPreviewed = false;
         issue.status = "applied";
         appliedCount += 1;
@@ -676,6 +700,16 @@ export class ScanCommands {
 
   private async refreshFileDecorations(): Promise<void> {
     await this.decorationController.refreshFileDecorations(this.lastScanResult);
+  }
+
+  private canApplyIssue(issue: CodeIssue): boolean {
+    return Boolean(
+      issue.status === "open" &&
+      issue.isPreviewed &&
+      issue.uiStatus === "FIX_READY" &&
+      issue.patchResult?.status === "resolved" &&
+      issue.syntaxCheck?.isValid === true,
+    );
   }
 
   private applyIssueDecorations(

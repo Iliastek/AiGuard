@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { CodeFix, CodeIssue, ScanResult } from "../types";
+import { GuardLogger } from "../logging/GuardLogger";
 
 type PreviewRebuildResult =
   | "updated"
@@ -35,7 +36,12 @@ export class ScanPreviewService {
     for (const issue of result.issues) {
       issue.fix = this.resolveFixForIssue(issue);
       issue.isPreviewed =
-        issue.status === "open" && PREVIEWABLE_SEVERITIES.has(issue.severity);
+        issue.status === "open" &&
+        PREVIEWABLE_SEVERITIES.has(issue.severity) &&
+        this.canPreviewIssue(issue);
+      if (!issue.isPreviewed && issue.status === "open") {
+        this.logPreviewBlock(issue);
+      }
     }
 
     const previewText = this.buildPreviewText(result.issues);
@@ -211,8 +217,16 @@ export class ScanPreviewService {
       return undefined;
     }
 
+    if (issue.patchResult?.status === "resolved" && issue.patchResult.fix) {
+      return issue.patchResult.fix;
+    }
+
     if (issue.fix) {
       return issue.fix;
+    }
+
+    if (issue.pipeline) {
+      return undefined;
     }
 
     const fallbackReplacement = this.deriveReplacementFromSuggestion(
@@ -298,5 +312,46 @@ export class ScanPreviewService {
 
   private escapeRegExp(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  private canPreviewIssue(issue: CodeIssue): boolean {
+    if (!issue.pipeline) {
+      return Boolean(issue.fix);
+    }
+
+    return (
+      issue.patchResult?.status === "resolved" &&
+      issue.syntaxCheck?.isValid === true
+    );
+  }
+
+  private logPreviewBlock(issue: CodeIssue): void {
+    if (!GuardLogger.isVerboseEnabled()) {
+      return;
+    }
+
+    const reasons: string[] = [];
+    if (!issue.fix) {
+      reasons.push("patchResolved=false");
+    }
+    if (issue.uiStatus !== "FIX_READY") {
+      reasons.push(`uiStatus=${issue.uiStatus || "unknown"}`);
+    }
+    if (issue.patchResult?.status !== "resolved") {
+      reasons.push(`patch=${issue.patchResult?.status || "missing"}`);
+    }
+    if (issue.syntaxCheck?.isValid !== true) {
+      reasons.push(
+        `syntaxValid=${String(issue.syntaxCheck?.isValid ?? false)}`,
+      );
+    }
+    if (issue.pipeline?.stage !== "previewable") {
+      reasons.push(`pipeline=${issue.pipeline?.stage || "missing"}`);
+    }
+
+    GuardLogger.verbose(
+      "Preview",
+      `Preview blocked for line ${issue.line + 1}: ${reasons.join(", ") || "unknown reason"}`,
+    );
   }
 }

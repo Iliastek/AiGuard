@@ -36,6 +36,9 @@ export function activate(context: vscode.ExtensionContext) {
       case "ignoreIssue":
         await scanCommands.ignoreIssue(action.issueId);
         break;
+      case "viewRecommendation":
+        await scanCommands.viewRecommendation(action.issueId);
+        break;
       case "applyAll":
         await scanCommands.applyAll();
         break;

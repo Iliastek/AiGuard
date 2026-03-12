@@ -1,51 +1,64 @@
 import * as vscode from "vscode";
-import * as https from "https";
-import { CodeIssue } from "../types";
+import { CodeIssue, FixCandidate } from "../types";
+import { AIChatClient } from "./AIChatClient";
+
+interface AIAnalyzerPatchRange {
+  startLine?: number;
+  endLine?: number;
+}
+
+interface AIAnalyzerPatch {
+  id?: string;
+  startLine?: number;
+  endLine?: number;
+  replacementCode?: string;
+  patchType?: "insert" | "replace" | "delete";
+  targetSnippet?: string;
+  contextBefore?: string;
+  contextAfter?: string;
+}
+
+interface AIAnalyzerIssueTarget {
+  strategy?: "line-range";
+  range?: AIAnalyzerPatchRange;
+  snippet?: string;
+  contextBefore?: string;
+  contextAfter?: string;
+}
 
 interface AIAnalyzerIssue {
+  patchId?: string;
   line?: number;
   severity?: "info" | "warning" | "error";
   message?: string;
   suggestedFix?: string;
   codeSnippet?: string;
+  patchType?: "insert" | "replace" | "delete";
+  replacement?: string;
+  confidence?: number;
+  target?: AIAnalyzerIssueTarget;
+  patch?: AIAnalyzerPatch;
 }
 
-interface ChatCompletionResponse {
-  choices?: Array<{
-    message?: {
-      content?: string;
-    };
-  }>;
+interface AIAnalyzerResponse {
+  issues?: AIAnalyzerIssue[];
+  patches?: AIAnalyzerPatch[];
 }
 
 export class AIAnalyzer {
+  private client = new AIChatClient();
+
   public async analyzeWithAPI(
     document: vscode.TextDocument,
   ): Promise<CodeIssue[]> {
-    const config = vscode.workspace.getConfiguration("aiCodeGuard");
-    const apiKey =
-      process.env.AIGUARD_API_KEY?.trim() ||
-      process.env.OPENAI_API_KEY?.trim() ||
-      String(config.get("apiKey", "")).trim();
-
-    if (!apiKey) {
+    if (!this.client.hasApiConfiguration()) {
       return [];
     }
 
-    const model =
-      process.env.AIGUARD_AI_MODEL?.trim() ||
-      String(config.get("aiModel", "GPT-5.4"));
-    const endpoint =
-      process.env.AIGUARD_API_ENDPOINT?.trim() ||
-      String(
-        config.get("apiEndpoint", "https://api.openai.com/v1/chat/completions"),
-      );
+    const config = vscode.workspace.getConfiguration("aiCodeGuard");
     const maxChars = Number(
       process.env.AIGUARD_MAX_ANALYZED_CHARS ||
         config.get("maxAnalyzedChars", 12000),
-    );
-    const timeoutMs = Number(
-      process.env.AIGUARD_API_TIMEOUT_MS || config.get("apiTimeoutMs", 12000),
     );
 
     const prompt = this.buildPrompt(
@@ -53,29 +66,12 @@ export class AIAnalyzer {
       document.getText().slice(0, maxChars),
     );
 
-    const payload = JSON.stringify({
-      model,
-      temperature: 0,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a strict static code reviewer. Return only compact JSON.",
-        },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
+    const responseText = await this.client.requestJson({
+      systemPrompt:
+        "You are a secure code refactoring engine. Return only compact JSON containing real executable code patches.",
+      userPrompt: prompt,
     });
-
-    const responseText = await this.postJSON(
-      endpoint,
-      apiKey,
-      payload,
-      timeoutMs,
-    );
-    const parsed = this.extractAIResponseContent(responseText);
+    const parsed = this.client.cleanJsonResponse(responseText);
     const aiIssues = this.parseIssuesJson(parsed);
 
     return this.mapIssues(document, aiIssues);
@@ -86,57 +82,71 @@ export class AIAnalyzer {
 
     return [
       "Analyze this code for bugs, security risks, maintainability issues, and suspicious AI-generated mistakes.",
+      "When an issue is fixable, you MUST provide a real code replacement that changes behavior or configuration safely.",
+      "The replacement must be a complete valid JavaScript or TypeScript statement.",
+      "Never return partial expressions such as identifiers, literals, or member access fragments.",
+      "The replacement must compile on its own when replacing the original line or range.",
+      "Do not use column ranges.",
+      "All patches must replace complete lines using only startLine and endLine.",
+      "Columns must not be used.",
       "Return JSON only in this format:",
-      '{"issues":[{"line":number,"severity":"info|warning|error","message":"string","suggestedFix":"string optional","codeSnippet":"string optional"}]}',
-      "suggestedFix must be code only (no explanation, no prose, no markdown).",
-      "If you cannot provide an exact replacement snippet, omit suggestedFix.",
+      '{"issues":[{"line":number,"severity":"info|warning|error","message":"string","codeSnippet":"string optional","patchId":"string optional","confidence":0.0,"target":{"strategy":"line-range optional","range":{"startLine":number,"endLine":number},"snippet":"string optional","contextBefore":"string optional","contextAfter":"string optional"},"patch":{"id":"string optional","startLine":number,"endLine":number,"patchType":"insert|replace|delete","replacementCode":"string","targetSnippet":"string optional","contextBefore":"string optional","contextAfter":"string optional"}}],"patches":[{"id":"string","startLine":number,"endLine":number,"patchType":"insert|replace|delete","replacementCode":"string","targetSnippet":"string optional","contextBefore":"string optional","contextAfter":"string optional"}]}',
+      "If you can propose a concrete safe fix, include a structured patch. The Guard will only execute deterministic patches and will not invent fixes.",
+      "replacementCode must contain valid executable code only, with no explanation, prose, markdown, or comments.",
+      "Do not provide advice. Do not provide TODO, FIXME, NOTE, or Consider-using comments.",
+      "Never insert comments such as //, /* */, or narrative text in replacementCode.",
+      "For single-line replacements, prefer complete statements such as 'const API_KEY = process.env.API_KEY;' instead of fragments like 'process.env.API_KEY'.",
+      "replacementCode must contain exactly the lines that replace the specified range.",
+      "Do not include extra indentation changes or unrelated lines.",
+      "Prefer top-level patches[] with patchId references from issues[]. If that is not possible, include patch inline under issue.patch.",
+      "Patch ranges must be 1-based and refer to exact lines in the numbered code.",
       "Use the line numbers from the code block below (they are prefixed as L<line>:).",
       "line must be 1-based and refer to the exact line number in that numbered code.",
       "If uncertain, set line to 0 and provide codeSnippet.",
+      "target.strategy should be line-range whenever a patch is provided.",
       `Language: ${languageId}`,
       "Code:",
       numberedCode,
     ].join("\n");
   }
 
-  private extractAIResponseContent(raw: string): string {
-    const parsed = JSON.parse(raw) as ChatCompletionResponse;
-    const content = parsed.choices?.[0]?.message?.content;
-
-    if (!content) {
-      throw new Error("AI API returned empty content");
-    }
-
-    return content;
-  }
-
-  private parseIssuesJson(content: string): AIAnalyzerIssue[] {
-    const cleaned = content
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/\s*```$/i, "")
-      .trim();
-
-    const parsed = JSON.parse(cleaned) as { issues?: AIAnalyzerIssue[] };
-    if (!Array.isArray(parsed.issues)) {
-      return [];
-    }
-    return parsed.issues;
+  private parseIssuesJson(content: string): AIAnalyzerResponse {
+    const parsed = JSON.parse(content) as AIAnalyzerResponse;
+    return {
+      issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+      patches: Array.isArray(parsed.patches) ? parsed.patches : [],
+    };
   }
 
   private mapIssues(
     document: vscode.TextDocument,
-    issues: AIAnalyzerIssue[],
+    response: AIAnalyzerResponse,
   ): CodeIssue[] {
+    const patchesById = new Map<string, AIAnalyzerPatch>();
+    for (const patch of response.patches || []) {
+      if (typeof patch.id === "string" && patch.id.trim()) {
+        patchesById.set(patch.id.trim(), patch);
+      }
+    }
+
+    const issues = response.issues || [];
     return issues
       .filter(
         (issue) =>
           typeof issue.message === "string" && issue.message.trim().length > 0,
       )
       .map((issue, index) => {
+        const resolvedPatch = this.resolvePatch(issue, patchesById);
         const line = this.resolveLine(document, issue);
         const lineText = line >= 0 ? document.lineAt(line).text : "";
         const suggestedFix = issue.suggestedFix?.trim() || undefined;
+        const fixCandidate = this.createFixCandidate(
+          document,
+          issue,
+          resolvedPatch,
+          line,
+          lineText,
+        );
 
         return {
           id: `ai-issue-${Date.now()}-${index}`,
@@ -146,21 +156,15 @@ export class AIAnalyzer {
           endColumn: lineText.length > 0 ? lineText.length : 1,
           severity: issue.severity ?? "warning",
           message: `AI Guard: ${issue.message!.trim()}`,
-          originalCode: lineText.trim() || issue.codeSnippet?.trim() || "",
+          originalCode:
+            resolvedPatch?.targetSnippet?.trim() ||
+            lineText.trim() ||
+            issue.target?.snippet?.trim() ||
+            issue.codeSnippet?.trim() ||
+            "",
           suggestedFix,
-          fix:
-            line >= 0 && suggestedFix
-              ? {
-                  type: "replace" as const,
-                  range: {
-                    startLine: line,
-                    startColumn: 0,
-                    endLine: line,
-                    endColumn: lineText.length,
-                  },
-                  replacement: suggestedFix,
-                }
-              : undefined,
+          patchId: resolvedPatch?.id?.trim() || issue.patchId?.trim(),
+          fixCandidate,
           source: "ai-generated" as const,
           status: "open" as const,
         };
@@ -224,49 +228,125 @@ export class AIAnalyzer {
     return text.replace(/\s+/g, " ").trim();
   }
 
-  private postJSON(
-    endpoint: string,
-    apiKey: string,
-    body: string,
-    timeoutMs: number,
-  ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const url = new URL(endpoint);
-      const req = https.request(
-        {
-          protocol: url.protocol,
-          hostname: url.hostname,
-          port: url.port || undefined,
-          path: `${url.pathname}${url.search}`,
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Length": Buffer.byteLength(body),
-          },
-          timeout: timeoutMs,
-        },
-        (res) => {
-          const chunks: Buffer[] = [];
+  private createFixCandidate(
+    document: vscode.TextDocument,
+    issue: AIAnalyzerIssue,
+    patch: AIAnalyzerPatch | undefined,
+    line: number,
+    lineText: string,
+  ): FixCandidate | undefined {
+    const replacement =
+      patch?.replacementCode?.trim() ||
+      issue.replacement?.trim() ||
+      issue.suggestedFix?.trim();
+    if (!replacement || line < 0) {
+      return undefined;
+    }
 
-          res.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-          res.on("end", () => {
-            const text = Buffer.concat(chunks).toString("utf-8");
-            if ((res.statusCode ?? 500) >= 400) {
-              reject(new Error(`AI API ${res.statusCode}: ${text}`));
-              return;
-            }
-            resolve(text);
-          });
-        },
-      );
+    const targetRange = patch ? this.toTargetRange(patch) : issue.target?.range;
+    const fallbackEndLine =
+      typeof patch?.endLine === "number" && patch.endLine >= 1
+        ? patch.endLine - 1
+        : line;
+    const startLine =
+      typeof patch?.startLine === "number" && patch.startLine >= 1
+        ? patch.startLine - 1
+        : line;
+    const normalizedEndLine = Math.max(startLine, fallbackEndLine);
 
-      req.on("timeout", () =>
-        req.destroy(new Error("AI API request timed out")),
-      );
-      req.on("error", (error) => reject(error));
-      req.write(body);
-      req.end();
-    });
+    return {
+      source: "analysis-seed",
+      patchType: patch?.patchType || issue.patchType || "replace",
+      replacement,
+      rationale: "Seeded directly from AI analysis output",
+      confidence:
+        typeof issue.confidence === "number" ? issue.confidence : undefined,
+      target: {
+        strategy: "line-range",
+        range:
+          targetRange && typeof targetRange.startLine === "number"
+            ? this.createFullLineRange(
+                document,
+                Math.max(0, targetRange.startLine - 1),
+                Math.max(0, (targetRange.endLine ?? targetRange.startLine) - 1),
+              )
+            : this.createFullLineRange(document, startLine, normalizedEndLine),
+        snippet:
+          this.stripLinePrefixesFromBlock(patch?.targetSnippet?.trim() || "") ||
+          this.stripLinePrefixesFromBlock(
+            issue.target?.snippet?.trim() || "",
+          ) ||
+          this.stripLinePrefixesFromBlock(issue.codeSnippet?.trim() || "") ||
+          lineText.trim(),
+        contextBefore:
+          patch?.contextBefore?.trim() ||
+          issue.target?.contextBefore?.trim() ||
+          (line > 0 ? document.lineAt(line - 1).text.trim() : undefined),
+        contextAfter:
+          patch?.contextAfter?.trim() ||
+          issue.target?.contextAfter?.trim() ||
+          (line + 1 < document.lineCount
+            ? document.lineAt(line + 1).text.trim()
+            : undefined),
+      },
+    };
+  }
+
+  private resolvePatch(
+    issue: AIAnalyzerIssue,
+    patchesById: Map<string, AIAnalyzerPatch>,
+  ): AIAnalyzerPatch | undefined {
+    if (issue.patch) {
+      return issue.patch;
+    }
+
+    const patchId = issue.patchId?.trim();
+    if (!patchId) {
+      return undefined;
+    }
+
+    return patchesById.get(patchId);
+  }
+
+  private toTargetRange(
+    patch: AIAnalyzerPatch,
+  ): AIAnalyzerPatchRange | undefined {
+    if (typeof patch.startLine !== "number" || patch.startLine < 1) {
+      return undefined;
+    }
+
+    return {
+      startLine: patch.startLine,
+      endLine: patch.endLine ?? patch.startLine,
+    };
+  }
+
+  private createFullLineRange(
+    document: vscode.TextDocument,
+    startLine: number,
+    endLine: number,
+  ): FixCandidate["target"]["range"] {
+    const normalizedStartLine = Math.max(0, startLine);
+    const normalizedEndLine = Math.max(normalizedStartLine, endLine);
+    const safeEndLine = Math.min(normalizedEndLine, document.lineCount - 1);
+
+    return {
+      startLine: normalizedStartLine,
+      startColumn: 0,
+      endLine: safeEndLine,
+      endColumn: document.lineAt(safeEndLine).text.length,
+    };
+  }
+
+  private stripLinePrefixesFromBlock(text: string): string {
+    if (!text) {
+      return text;
+    }
+
+    return text
+      .split("\n")
+      .map((line) => line.replace(/^L\d+:\s*/i, ""))
+      .join("\n")
+      .trim();
   }
 }

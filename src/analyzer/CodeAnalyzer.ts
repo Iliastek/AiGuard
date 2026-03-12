@@ -1,7 +1,10 @@
 import * as vscode from "vscode";
 import { CodeIssue, ScanResult } from "../types";
+import { FixRuleEngine } from "./FixRuleEngine";
 
 export class CodeAnalyzer {
+  private ruleEngine = new FixRuleEngine();
+
   public async analyzeDocument(
     document: vscode.TextDocument,
   ): Promise<ScanResult> {
@@ -30,6 +33,10 @@ export class CodeAnalyzer {
             severity: "warning",
             message: "AI Guard: Consider removing console statement",
             originalCode: line.trim(),
+            recommendation:
+              "Remove console output from production code or replace it with structured logging.",
+            fixability: "auto",
+            uiStatus: "OPEN",
             suggestedFix: line.replace(
               /console\.(log|warn|error)\(.*?\);?/,
               "// Removed console",
@@ -62,12 +69,16 @@ export class CodeAnalyzer {
           severity: "info",
           message: `AI Guard: ${todoMatch[1]} found - ${todoMatch[2].trim()}`,
           originalCode: line.trim(),
+          recommendation: "Review the TODO manually before shipping this code.",
+          fixability: "manual",
+          uiStatus: "BLOCKED",
           source: "analysis",
           status: "open",
         });
       }
     });
 
+    issues.push(...this.ruleEngine.detectIssues(document));
     const scanDuration = Date.now() - startTime;
 
     return {

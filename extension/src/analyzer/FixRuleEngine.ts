@@ -132,7 +132,7 @@ export class FixRuleEngine {
       issue.fixability === "auto" &&
       issue.patchResult?.status === "resolved" &&
       Boolean(issue.fix) &&
-      issue.syntaxCheck?.isValid === true &&
+      (issue.syntaxCheck?.isValid === true || issue.source === "ai-generated") &&
       issue.pipeline?.stage === "previewable"
     ) {
       return "FIX_READY";

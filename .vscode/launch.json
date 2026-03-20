@@ -10,13 +10,13 @@
 			"type": "extensionHost",
 			"request": "launch",
 			"args": [
-				"--extensionDevelopmentPath=${workspaceFolder}"
+				"--extensionDevelopmentPath=${workspaceFolder}/extension"
 			],
 			"envFile": "${workspaceFolder}/.env",
 			"outFiles": [
-				"${workspaceFolder}/dist/**/*.js"
+				"${workspaceFolder}/extension/dist/**/*.js"
 			],
-			"preLaunchTask": "npm: compile"
+			"preLaunchTask": "extension: compile"
 		}
 	]
 }

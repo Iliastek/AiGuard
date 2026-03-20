@@ -2,6 +2,15 @@ export type IssueStatus = "open" | "applied" | "ignored";
 export type IssueFixability = "auto" | "suggestion" | "manual";
 export type IssueUIStatus = "OPEN" | "FIX_READY" | "BLOCKED";
 
+export type IssuePipelineStage =
+  | "analysis"
+  | "generated"
+  | "reviewed"
+  | "patched"
+  | "validated"
+  | "previewable"
+  | "rejected";
+
 export interface FixRange {
   startLine: number;
   startColumn: number;
@@ -14,15 +23,6 @@ export interface CodeFix {
   range: FixRange;
   replacement: string;
 }
-
-export type IssuePipelineStage =
-  | "analysis"
-  | "generated"
-  | "reviewed"
-  | "patched"
-  | "validated"
-  | "previewable"
-  | "rejected";
 
 export interface IssueAnalysis {
   summary: string;
@@ -117,7 +117,7 @@ export interface ScanResult {
 }
 
 export interface GuardConfig {
-  apiKey: string;
+  licenseKey: string;
   scanMode: "realtime" | "onDemand" | "preCommit";
   enabledLanguages: string[];
 }

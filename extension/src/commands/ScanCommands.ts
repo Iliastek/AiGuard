@@ -471,10 +471,13 @@ export class ScanCommands {
       return;
     }
 
-    await vscode.window.showWarningMessage(
+    const action = await vscode.window.showWarningMessage(
       `AI Guard: Found ${result.issues.length} issue(s) in current file`,
+      "View Issues",
     );
-    this.showIssuesQuickPick(result.issues);
+    if (action === "View Issues") {
+      this.showIssuesQuickPick(result.issues);
+    }
   }
 
   private async runAnalysis(

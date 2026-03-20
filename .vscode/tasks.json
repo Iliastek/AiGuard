@@ -8,7 +8,10 @@
 			"script": "compile",
 			"group": "build",
 			"problemMatcher": "$tsc",
-			"label": "npm: compile",
+			"label": "extension: compile",
+			"options": {
+				"cwd": "${workspaceFolder}/extension"
+			},
 			"presentation": {
 				"reveal": "never"
 			}

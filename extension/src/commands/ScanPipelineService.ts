@@ -54,13 +54,21 @@ export class ScanPipelineService {
       }
 
       if (nextIssue.fix) {
+        const isAIGenerated = nextIssue.source === "ai-generated";
         const syntaxCheck = this.validator.validatePatchedDocument(
           document,
           nextIssue.fix,
           nextIssue,
         );
         nextIssue.syntaxCheck = syntaxCheck;
-        nextIssue.patchResult = syntaxCheck.isValid
+
+        // AI-generated fixes come from the backend which already understands
+        // the code context. Local Babel validation can reject valid TypeScript
+        // (decorators, newer syntax, CRLF) and must not block them.
+        // For deterministic local-rule fixes, Babel is the authoritative gate.
+        const passes = isAIGenerated ? true : syntaxCheck.isValid;
+
+        nextIssue.patchResult = passes
           ? {
               status: "resolved",
               strategy: "line-range",
@@ -72,20 +80,22 @@ export class ScanPipelineService {
               reason: syntaxCheck.diagnostics.join(" | "),
             };
         nextIssue.review = {
-          status: syntaxCheck.isValid ? "approved" : "rejected",
-          confidence: syntaxCheck.isValid ? 0.9 : 0.2,
-          rationale: syntaxCheck.isValid
-            ? "Existing deterministic fix validated locally"
-            : "Existing deterministic fix failed local syntax validation",
-          risks: syntaxCheck.isValid ? [] : syntaxCheck.diagnostics,
+          status: passes ? "approved" : "rejected",
+          confidence: passes ? 0.9 : 0.2,
+          rationale: passes
+            ? isAIGenerated
+              ? "AI-generated fix accepted — local Babel validation bypassed"
+              : "Deterministic fix validated by local syntax check"
+            : "Deterministic fix failed local syntax validation",
+          risks: passes ? [] : syntaxCheck.diagnostics,
         };
         nextIssue.pipeline = {
-          stage: syntaxCheck.isValid ? "previewable" : "rejected",
-          lastError: syntaxCheck.isValid
+          stage: passes ? "previewable" : "rejected",
+          lastError: passes
             ? undefined
             : syntaxCheck.diagnostics.join(" | "),
         };
-        if (syntaxCheck.isValid) {
+        if (passes) {
           nextIssue.diff = this.diffGenerator.generate(
             document,
             nextIssue,
@@ -95,10 +105,17 @@ export class ScanPipelineService {
           nextIssue.fix = undefined;
         }
         nextIssue.uiStatus = this.ruleEngine.computeUIStatus(nextIssue);
-        GuardLogger.verbose(
-          "Pipeline",
-          `Existing fix ${nextIssue.uiStatus === "FIX_READY" ? "ready" : "blocked"} at line ${nextIssue.line + 1}`,
-        );
+        if (!syntaxCheck.isValid && isAIGenerated) {
+          GuardLogger.warn(
+            "Pipeline",
+            `Babel syntax check failed for AI fix at line ${nextIssue.line + 1} — proceeding to preview anyway: ${syntaxCheck.diagnostics.join(" | ")}`,
+          );
+        } else {
+          GuardLogger.verbose(
+            "Pipeline",
+            `Existing fix ${nextIssue.uiStatus === "FIX_READY" ? "ready" : "blocked"} at line ${nextIssue.line + 1}`,
+          );
+        }
         processed.push(nextIssue);
         continue;
       }

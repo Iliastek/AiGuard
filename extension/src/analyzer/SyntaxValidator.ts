@@ -60,21 +60,31 @@ export class SyntaxValidator {
   }
 
   private validateSyntax(code: string, languageId: string): string[] {
+    // Normalize CRLF to LF so Babel column tracking stays consistent.
+    const normalized = code.replace(/\r\n/g, "\n");
+    const plugins = this.getParserPlugins(languageId);
+
+    // Try "unambiguous" first (handles both CJS require() and ESM import).
+    // Fall back to "script" for files that have non-strict CJS patterns.
+    for (const sourceType of ["unambiguous", "script"] as const) {
+      try {
+        parse(normalized, { sourceType, plugins });
+        return [];
+      } catch {
+        // Try next source type.
+      }
+    }
+
+    // Both attempts failed — collect the error from "unambiguous" for reporting.
     try {
-      parse(code, {
-        sourceType: "module",
-        plugins: this.getParserPlugins(languageId),
-      });
+      parse(normalized, { sourceType: "unambiguous", plugins });
       return [];
     } catch (error: unknown) {
       const parseError = error as {
         message?: string;
-        loc?: {
-          line?: number;
-          column?: number;
-        };
+        loc?: { line?: number; column?: number };
       };
-      const message = parseError.message || "Unknown syntax error";
+      const message = parseError.message ?? "Unknown syntax error";
       const line = parseError.loc?.line;
       const column = parseError.loc?.column;
       return [
@@ -94,9 +104,14 @@ export class SyntaxValidator {
     ].includes(languageId);
   }
 
-  private getParserPlugins(languageId: string): Array<"typescript" | "jsx"> {
-    return languageId === "javascriptreact" || languageId === "typescriptreact"
-      ? ["typescript", "jsx"]
-      : ["typescript"];
+  private getParserPlugins(languageId: string): Array<"typescript" | "jsx" | "decorators" | "importAttributes"> {
+    const isJSX = ["javascript", "javascriptreact", "typescriptreact"].includes(languageId);
+    const isTS = languageId === "typescript" || languageId === "typescriptreact";
+    const plugins: Array<"typescript" | "jsx" | "decorators" | "importAttributes"> = [];
+    if (isTS) plugins.push("typescript");
+    if (isJSX) plugins.push("jsx");
+    plugins.push("decorators");
+    plugins.push("importAttributes");
+    return plugins;
   }
 }

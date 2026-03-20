@@ -1,50 +1,42 @@
 import OpenAI from "openai";
+import type { CodeIssue } from "@aiguard/shared";
 import { PromptBuilder } from "./PromptBuilder";
 
 const MODEL = "gpt-4o-mini";
 const MAX_CODE_CHARS = 12_000;
 
-interface RawPatch {
-  id?: string;
-  startLine?: number;
-  endLine?: number;
-  patchType?: "insert" | "replace" | "delete";
-  replacementCode?: string;
-  targetSnippet?: string;
-  contextBefore?: string;
-  contextAfter?: string;
-}
+type IssueType = "SECURITY" | "RELIABILITY" | "INJECTION" | "DATA_LEAKAGE";
+type RawSeverity = "high" | "medium" | "low";
 
 interface RawIssue {
   line?: number;
-  severity?: "info" | "warning" | "error";
-  message?: string;
-  codeSnippet?: string;
-  patchId?: string;
-  confidence?: number;
-  target?: {
-    strategy?: string;
-    range?: { startLine?: number; endLine?: number };
-    snippet?: string;
-    contextBefore?: string;
-    contextAfter?: string;
-  };
-  patch?: RawPatch;
+  type?: IssueType;
+  severity?: RawSeverity;
+  title?: string;
+  explanation?: string;
+  fix_code?: string;
+  fix_explanation?: string;
 }
 
 interface RawAnalyzeResponse {
   issues?: RawIssue[];
-  patches?: RawPatch[];
+}
+
+interface NormalizedPatch {
+  startLine: number;
+  endLine: number;
+  patchType: "replace";
+  replacementCode: string;
 }
 
 export interface NormalizedIssue {
   line: number;
+  type: IssueType;
   severity: "info" | "warning" | "error";
   message: string;
   codeSnippet?: string;
   confidence: number;
-  patch?: RawPatch;
-  target?: RawIssue["target"];
+  patch?: NormalizedPatch;
 }
 
 export class OpenAIService {
@@ -82,6 +74,36 @@ export class OpenAIService {
     return this.parse(raw);
   }
 
+  async generateFix(
+    language: string,
+    issue: CodeIssue,
+    codeContext: string,
+  ): Promise<string | undefined> {
+    const userPrompt = this.promptBuilder.buildFixPrompt(language, issue, codeContext);
+
+    const completion = await this.getClient().chat.completions.create({
+      model: MODEL,
+      temperature: 0,
+      messages: [
+        { role: "system", content: PromptBuilder.FIX_SYSTEM_PROMPT },
+        { role: "user", content: userPrompt },
+      ],
+    });
+
+    const raw = completion.choices[0]?.message?.content ?? "";
+    const cleaned = raw
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+
+    const parsed = JSON.parse(cleaned) as { replacement?: unknown };
+    const replacement = parsed.replacement;
+    return typeof replacement === "string" && replacement.trim()
+      ? replacement.trim()
+      : undefined;
+  }
+
   private parse(raw: string): NormalizedIssue[] {
     const cleaned = raw
       .replace(/^```json\s*/i, "")
@@ -90,28 +112,35 @@ export class OpenAIService {
       .trim();
 
     const parsed = JSON.parse(cleaned) as RawAnalyzeResponse;
-    const patches = new Map<string, RawPatch>();
 
-    for (const p of parsed.patches ?? []) {
-      if (p.id) {
-        patches.set(p.id, p);
-      }
-    }
+    return (parsed.issues ?? [])
+      .filter((issue) => typeof issue.line === "number" && issue.line > 0)
+      .map((issue) => {
+        const line = issue.line as number;
+        const patch: NormalizedPatch | undefined = issue.fix_code
+          ? {
+              startLine: line,
+              endLine: line,
+              patchType: "replace",
+              replacementCode: issue.fix_code,
+            }
+          : undefined;
 
-    return (parsed.issues ?? []).map((issue) => {
-      const resolvedPatch =
-        (issue.patchId ? patches.get(issue.patchId) : undefined) ??
-        issue.patch;
+        return {
+          line,
+          type: issue.type ?? "SECURITY",
+          severity: this.mapSeverity(issue.severity),
+          message: issue.title ?? "",
+          codeSnippet: issue.explanation,
+          confidence: issue.severity === "high" ? 0.9 : issue.severity === "medium" ? 0.7 : 0.5,
+          patch,
+        };
+      });
+  }
 
-      return {
-        line: issue.line ?? 0,
-        severity: issue.severity ?? "warning",
-        message: issue.message ?? "",
-        codeSnippet: issue.codeSnippet,
-        confidence: issue.confidence ?? 0,
-        target: issue.target,
-        patch: resolvedPatch,
-      };
-    });
+  private mapSeverity(raw: RawSeverity | undefined): "info" | "warning" | "error" {
+    if (raw === "high") return "error";
+    if (raw === "medium") return "warning";
+    return "info";
   }
 }

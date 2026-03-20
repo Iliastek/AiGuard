@@ -22,6 +22,7 @@ export async function analyzeRoutes(server: FastifyInstance): Promise<void> {
     async (request, reply) => {
       const { code, language, filePath } = request.body;
       const start = Date.now();
+      const codeLines = code.split("\n");
 
       const normalized = await openai.analyze(language, code);
 
@@ -29,8 +30,11 @@ export async function analyzeRoutes(server: FastifyInstance): Promise<void> {
         const line = to0(n.line);
         const patchStartLine = rangeLineToVsc(n.patch?.startLine, n.line);
         const patchEndLine = rangeLineToVsc(n.patch?.endLine, n.line);
-        const targetStartLine = rangeLineToVsc(n.target?.range?.startLine, n.line);
-        const targetEndLine = rangeLineToVsc(n.target?.range?.endLine, n.line);
+        // endColumn must point to the end of the last replaced line so that
+        // SyntaxValidator.applyFix correctly slices out the original text.
+        // endColumn: 0 would leave the original line intact and prepend the
+        // replacement, producing doubled code and a guaranteed syntax error.
+        const patchEndColumn = (codeLines[patchEndLine] ?? "").length;
 
         return {
           id: crypto.randomUUID(),
@@ -39,43 +43,21 @@ export async function analyzeRoutes(server: FastifyInstance): Promise<void> {
           endLine: n.patch ? patchEndLine : line,
           endColumn: 0,
           severity: n.severity,
-          message: n.message,
+          message: `[${n.type}] ${n.message}`,
           originalCode: n.codeSnippet ?? "",
           source: "ai-generated",
           status: "open",
-          fixability: n.patch ? "auto" : "manual",
+          fixability: "auto",
           ...(n.patch && {
             fix: {
-              type: n.patch.patchType ?? "replace",
+              type: n.patch.patchType,
               range: {
                 startLine: patchStartLine,
                 startColumn: 0,
                 endLine: patchEndLine,
-                endColumn: 0,
+                endColumn: patchEndColumn,
               },
-              replacement: n.patch.replacementCode ?? "",
-            },
-          }),
-          ...(n.target && {
-            fixCandidate: {
-              source: "generator",
-              patchType: n.patch?.patchType ?? "replace",
-              replacement: n.patch?.replacementCode ?? "",
-              confidence: n.confidence,
-              target: {
-                strategy: (n.target.strategy as "line-range") ?? "line-range",
-                range: n.target.range
-                  ? {
-                      startLine: targetStartLine,
-                      startColumn: 0,
-                      endLine: targetEndLine,
-                      endColumn: 0,
-                    }
-                  : undefined,
-                snippet: n.target.snippet,
-                contextBefore: n.target.contextBefore,
-                contextAfter: n.target.contextAfter,
-              },
+              replacement: n.patch.replacementCode,
             },
           }),
         };

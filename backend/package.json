@@ -1,0 +1,28 @@
+{
+  "name": "@aiguard/backend",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "lint": "eslint src",
+    "check-types": "tsc --noEmit",
+    "test:scan": "tsx test/scan-quality.ts"
+  },
+  "dependencies": {
+    "@aiguard/shared": "*",
+    "dotenv": "^16.5.0",
+    "fastify": "^5.3.3",
+    "@fastify/cors": "^10.0.2",
+    "fastify-plugin": "^5.0.1",
+    "openai": "^4.98.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.x",
+    "typescript": "^5.9.3",
+    "tsx": "^4.19.3",
+    "eslint": "^9.39.3",
+    "typescript-eslint": "^8.56.1"
+  }
+}
